@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+training/
+
+# Sensitive SSH/private key files
+id_rsa*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Environment and local secrets
+.env
+.env.*
+*.local
+*.secret
+*.secrets
+
+# Local saved runtime configs / exported browser configs
+localStorage*.json
+
+# IDE / system files
+.DS_Store
+.vscode/
+.idea/
+.codebuddy/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Keep production artifact checked in intentionally
+!dist/
+!dist/index.html

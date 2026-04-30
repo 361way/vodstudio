@@ -1,0 +1,190 @@
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+        body { margin: 0; padding: 0; background-color: #09090b; }
+        /* Prevent selection during drag - applied to canvas only mostly */
+        .select-none { user-select: none; }
+        /* Allow selection in chat */
+        .select-text { user-select: text; }
+        
+        /* Loader animation fallback */
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .animate-spin { animation: spin 1s linear infinite; }
+        
+        /* Artistic Minimalist Loader - V2 with Credits */
+        .art-loader-container {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #09090b;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center; /* 垂直居中 */
+            z-index: 9999;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            color: #e4e4e7;
+        }
+
+        /* 将中间动画打包，确保它稍微偏上一点，给底部留空间 */
+        .art-center-group {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            transform: translateY(-20px); /* 视觉微调 */
+        }
+
+        .art-visual {
+            position: relative;
+            width: 60px;
+            height: 60px;
+            margin-bottom: 30px;
+        }
+
+        .art-ring-outer {
+            position: absolute; inset: 0;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            animation: art-breathe 4s ease-in-out infinite;
+        }
+
+        .art-ring-inner {
+            position: absolute; inset: 0;
+            border-radius: 50%;
+            border: 1px solid transparent;
+            border-top-color: #fff;
+            border-left-color: rgba(255,255,255,0.3);
+            opacity: 0.8;
+            animation: art-spin 2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+        }
+
+        .art-dot {
+            position: absolute; top: 50%; left: 50%;
+            width: 4px; height: 4px;
+            background-color: #fff;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 0 10px rgba(255,255,255,0.5);
+        }
+
+        .art-title {
+            font-size: 12px; font-weight: 300;
+            text-transform: uppercase;
+            letter-spacing: 0.3em;
+            opacity: 0.9; margin-bottom: 8px;
+        }
+
+        .art-status {
+            font-family: 'Courier New', monospace;
+            font-size: 10px; color: #71717a;
+            letter-spacing: 0.1em;
+            animation: art-pulse 2s ease-in-out infinite;
+        }
+
+        /* --- 底部署名区域样式 --- */
+        .art-footer {
+            position: absolute;
+            bottom: 40px; /* 距离底部 */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            gap: 12px;
+            opacity: 0; /* 初始隐藏 */
+            animation: art-fade-up 1s ease-out 0.5s forwards; /* 延迟淡入 */
+        }
+
+        .footer-author {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .footer-author .label {
+            font-size: 9px;
+            color: #52525b;
+            text-transform: uppercase;
+            letter-spacing: 0.2em;
+        }
+
+        .footer-author .name {
+            font-size: 14px;
+            font-weight: 500;
+            letter-spacing: 0.5em; /* 名字字间距拉大，极显逼格 */
+            color: #fff;
+            text-indent: 0.5em; /* 修正字间距带来的视觉中心偏移 */
+        }
+
+        .footer-divider {
+            width: 20px;
+            height: 1px;
+            background-color: #27272a;
+        }
+
+        .footer-thanks {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .footer-thanks .label {
+            font-size: 8px;
+            color: #3f3f46;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        .footer-thanks .content {
+            font-size: 10px;
+            color: #71717a;
+            font-family: 'Courier New', monospace; /* 致谢使用代码字体 */
+        }
+
+        .footer-thanks .highlight {
+            color: #a1a1aa;
+            font-weight: 600;
+        }
+
+        /* 动画定义 */
+        @keyframes art-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        @keyframes art-breathe { 0%, 100% { transform: scale(1); opacity: 0.5; } 50% { transform: scale(1.1); opacity: 0.2; } }
+        @keyframes art-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.8; } }
+        @keyframes art-fade-up { 
+            from { opacity: 0; transform: translateY(10px); } 
+            to { opacity: 1; transform: translateY(0); } 
+        }
+
+/* Utility: Hide Scrollbar */
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+.no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+/* V3.7.23: Chat bubble markdown rendering - remove extra margins */
+.markdown-body {
+    line-height: 1.5;
+}
+.markdown-body p {
+    margin: 0;
+}
+.markdown-body p + p {
+    margin-top: 0.5em;
+}
+.markdown-body ul, .markdown-body ol {
+    margin: 0.5em 0;
+    padding-left: 1.5em;
+}
+.markdown-body pre {
+    margin: 0.5em 0;
+    padding: 0.5em;
+    border-radius: 0.5em;
+    overflow-x: auto;
+}
+.markdown-body code {
+    font-size: 0.875em;
+}
