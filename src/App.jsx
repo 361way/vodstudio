@@ -71,6 +71,10 @@ import {
     VOD_VIDEO_MODEL_ID,
     VOD_IMAGE_MODEL_MATRIX,
     VOD_VIDEO_MODEL_MATRIX,
+    VOD_DEFAULT_IMAGE_MODEL_NAME,
+    VOD_DEFAULT_IMAGE_MODEL_VERSION,
+    VOD_DEFAULT_VIDEO_MODEL_NAME,
+    VOD_DEFAULT_VIDEO_MODEL_VERSION,
     isVodModel,
     parseVodCredentials,
     resolveVodSubModel,
@@ -1828,6 +1832,86 @@ const DEFAULT_PROVIDERS = {
     'tencent-vod': { key: '', url: 'https://vod.tencentcloudapi.com', apiType: 'tencent-vod', useProxy: true, forceAsync: true },
 };
 
+const getVodMatrixByType = (type) => type === 'video' ? VOD_VIDEO_MODEL_MATRIX : VOD_IMAGE_MODEL_MATRIX;
+
+const getVodDefaultModelNameByType = (type) => type === 'video'
+    ? VOD_DEFAULT_VIDEO_MODEL_NAME
+    : VOD_DEFAULT_IMAGE_MODEL_NAME;
+
+const getVodDefaultModelVersionByType = (type) => type === 'video'
+    ? VOD_DEFAULT_VIDEO_MODEL_VERSION
+    : VOD_DEFAULT_IMAGE_MODEL_VERSION;
+
+const getVodConfigType = (config) => {
+    if (!config || config.provider !== TENCENT_VOD_PROVIDER_KEY) return null;
+    if (config.id === VOD_VIDEO_MODEL_ID || config.type === 'Video') return 'video';
+    if (config.id === VOD_IMAGE_MODEL_ID || config.type === 'Image') return 'image';
+    return null;
+};
+
+const buildVodCustomParams = (type) => {
+    const isVideo = type === 'video';
+    const matrix = getVodMatrixByType(type);
+    const modelNames = Object.keys(matrix);
+    const allVersions = [...new Set(modelNames.flatMap((name) => matrix[name]))];
+    const defaultModelName = getVodDefaultModelNameByType(type);
+    const defaultModelVersion = getVodDefaultModelVersionByType(type);
+    const modelNameNotes = isVideo
+        ? { Kling: 'Kling（可灵）', Vidu: 'Vidu', Hailuo: 'Hailuo（海螺）', Jimeng: 'Jimeng（即梦）', Hunyuan: 'Hunyuan（混元）', Mingmou: 'Mingmou（明眸）', GV: 'GV', OS: 'OS', PixVerse: 'PixVerse' }
+        : { OG: 'OG', GG: 'GG', SI: 'SI', Qwen: 'Qwen', Hunyuan: 'Hunyuan（混元）', Vidu: 'Vidu', Kling: 'Kling（可灵）', Jimeng: 'Jimeng（兼容）' };
+    return [
+        {
+            id: 'vod-model-name',
+            name: 'ModelName',
+            values: modelNames,
+            defaultValue: modelNames.includes(defaultModelName) ? defaultModelName : (modelNames[0] || ''),
+            override: false,
+            notesEnabled: true,
+            valueNotes: modelNameNotes
+        },
+        {
+            id: 'vod-model-version',
+            name: 'ModelVersion',
+            values: allVersions,
+            defaultValue: allVersions.includes(defaultModelVersion) ? defaultModelVersion : (allVersions[0] || ''),
+            override: false,
+            notesEnabled: false,
+            valueNotes: {},
+            dependsOn: 'vod-model-name',
+            versionMap: matrix
+        }
+    ];
+};
+
+const getVodSelectionFromCustomParams = (type, customParams) => {
+    const matrix = getVodMatrixByType(type);
+    const modelNames = Object.keys(matrix);
+    const params = Array.isArray(customParams) ? customParams : [];
+    const readDefault = (ids, names) => {
+        const param = params.find((item) => ids.includes(item?.id) || names.includes(item?.name));
+        return String(param?.defaultValue || '').trim();
+    };
+    let modelName = readDefault(['vod-model-name'], ['ModelName', 'modelName']) || getVodDefaultModelNameByType(type);
+    if (!modelNames.includes(modelName)) modelName = modelNames.includes(getVodDefaultModelNameByType(type)) ? getVodDefaultModelNameByType(type) : (modelNames[0] || '');
+    const versions = matrix[modelName] || [];
+    let modelVersion = readDefault(['vod-model-version'], ['ModelVersion', 'modelVersion']) || getVodDefaultModelVersionByType(type);
+    if (!versions.includes(modelVersion)) modelVersion = versions.includes(getVodDefaultModelVersionByType(type)) ? getVodDefaultModelVersionByType(type) : (versions[0] || '');
+    return { modelName, modelVersion, versions };
+};
+
+const buildVodCustomParamsWithSelection = (type, modelName, modelVersion) => {
+    const matrix = getVodMatrixByType(type);
+    const modelNames = Object.keys(matrix);
+    const safeModelName = modelNames.includes(modelName) ? modelName : (modelNames[0] || '');
+    const versions = matrix[safeModelName] || [];
+    const safeModelVersion = versions.includes(modelVersion) ? modelVersion : (versions[0] || '');
+    return buildVodCustomParams(type).map((param) => {
+        if (param.id === 'vod-model-name') return { ...param, defaultValue: safeModelName };
+        if (param.id === 'vod-model-version') return { ...param, defaultValue: safeModelVersion, values: versions };
+        return param;
+    });
+};
+
 // V3.6.0: 模型配置（简化版 - id 即 modelName，无 displayName）
 const DEFAULT_API_CONFIGS = [
     // Chat Models
@@ -1866,8 +1950,8 @@ const DEFAULT_API_CONFIGS = [
     { id: 'grok-video-3', provider: 'grok', type: 'Video', durations: ['8s', '5s'] },
 
     // 腾讯云 VOD AIGC（通过 adapter 驱动，ModelName/ModelVersion 通过节点自定义参数选择）
-    { id: VOD_IMAGE_MODEL_ID, provider: TENCENT_VOD_PROVIDER_KEY, type: 'Image' },
-    { id: VOD_VIDEO_MODEL_ID, provider: TENCENT_VOD_PROVIDER_KEY, type: 'Video', durations: ['5s', '10s'] },
+    { id: VOD_IMAGE_MODEL_ID, provider: TENCENT_VOD_PROVIDER_KEY, type: 'Image', customParams: buildVodCustomParams('image') },
+    { id: VOD_VIDEO_MODEL_ID, provider: TENCENT_VOD_PROVIDER_KEY, type: 'Video', durations: ['5s', '10s'], customParams: buildVodCustomParams('video') },
 ];
 
 const RATIOS = ['Auto', '1:1', '16:9', '9:16', '4:3', '3:4', '21:9', '3:2', '2:3'];
@@ -2233,32 +2317,9 @@ const DEFAULT_MODEL_LIBRARY = [
             const supportsFirstLastFrame = isVideo && /veo3\.1/i.test(config.id);
             const supportsHD = isVideo && /sora-2/i.test(config.id);
             // 为腾讯云 VOD 模型注入 ModelName / ModelVersion 下拉参数
-            let vodCustomParams = [];
-            if (config.provider === TENCENT_VOD_PROVIDER_KEY) {
-                const matrix = isVideo ? VOD_VIDEO_MODEL_MATRIX : VOD_IMAGE_MODEL_MATRIX;
-                const modelNames = Object.keys(matrix);
-                const allVersions = [...new Set(modelNames.flatMap((n) => matrix[n]))];
-                vodCustomParams = [
-                    {
-                        id: 'vod-model-name',
-                        name: 'ModelName',
-                        values: modelNames,
-                        defaultValue: modelNames[0] || '',
-                        override: false,
-                        notesEnabled: false,
-                        valueNotes: {}
-                    },
-                    {
-                        id: 'vod-model-version',
-                        name: 'ModelVersion',
-                        values: allVersions,
-                        defaultValue: matrix[modelNames[0]]?.[0] || '',
-                        override: false,
-                        notesEnabled: false,
-                        valueNotes: {}
-                    }
-                ];
-            }
+            const vodCustomParams = config.provider === TENCENT_VOD_PROVIDER_KEY
+                ? buildVodCustomParams(isVideo ? 'video' : 'image')
+                : [];
             const entryBase = {
                 id: config.id,
                 displayName: config.id,
@@ -2794,6 +2855,12 @@ const normalizeCustomParams = (params) => {
         const notesEnabled = typeof param.notesEnabled === 'boolean'
             ? param.notesEnabled
             : Object.keys(normalizedNotes).length > 0;
+        const versionMap = param.versionMap && typeof param.versionMap === 'object'
+            ? Object.fromEntries(Object.entries(param.versionMap).map(([key, list]) => [
+                String(key).trim(),
+                Array.isArray(list) ? list.map(value => String(value).trim()).filter(Boolean) : []
+            ]).filter(([key, list]) => key && list.length > 0))
+            : null;
         return {
             id,
             name,
@@ -2801,7 +2868,9 @@ const normalizeCustomParams = (params) => {
             override: !!param.override,
             notesEnabled,
             valueNotes: normalizedNotes,
-            defaultValue
+            defaultValue,
+            dependsOn: param.dependsOn ? String(param.dependsOn).trim() : '',
+            versionMap
         };
     }).filter(Boolean);
 };
@@ -3466,6 +3535,18 @@ const normalizeModelLibraryEntry = (entry, index = 0) => {
         responseParser: entry.responseParser || ''
     };
 };
+const migrateVodModelLibraryEntries = (entries) => {
+    const source = Array.isArray(entries) ? entries : [];
+    const canonicalVodIds = [VOD_IMAGE_MODEL_ID, VOD_VIDEO_MODEL_ID];
+    const result = source.filter((entry) => !canonicalVodIds.includes(entry?.id));
+    canonicalVodIds.forEach((id) => {
+        const canonical = DEFAULT_MODEL_LIBRARY.find((entry) => entry.id === id);
+        if (!canonical) return;
+        result.push(normalizeModelLibraryEntry({ ...canonical }, result.length));
+    });
+    return result;
+};
+
 const normalizeRequestOverridePatch = (patch) => {
     return normalizePreviewOverridePatch(patch);
 };
@@ -5386,15 +5467,16 @@ function TapnowApp() {
             try {
                 const parsed = JSON.parse(saved);
                 if (Array.isArray(parsed)) {
-                    return parsed
+                    const normalized = parsed
                         .map((entry, idx) => normalizeModelLibraryEntry(entry, idx))
                         .filter(Boolean);
+                    return migrateVodModelLibraryEntries(normalized);
                 }
             } catch (e) {
                 console.error('加载 modelLibrary 配置失败:', e);
             }
         }
-    return DEFAULT_MODEL_LIBRARY.map((entry) => ({ ...entry }));
+    return migrateVodModelLibraryEntries(DEFAULT_MODEL_LIBRARY.map((entry) => ({ ...entry })));
 });
     const collapsedLibraryStateLoadedRef = useRef(false);
     const [collapsedLibraryModels, setCollapsedLibraryModels] = useState(() => {
@@ -5543,18 +5625,26 @@ function TapnowApp() {
                 // V3.8.9: 确保 VOD AIGC 模型始终存在且 provider 正确
                 // （旧版存量数据可能没有 VOD 模型，或 provider 字段丢失）
                 const vodModels = [
-                    { id: VOD_IMAGE_MODEL_ID, provider: TENCENT_VOD_PROVIDER_KEY, type: 'Image' },
-                    { id: VOD_VIDEO_MODEL_ID, provider: TENCENT_VOD_PROVIDER_KEY, type: 'Video', durations: ['5s', '10s'] },
+                    { id: VOD_IMAGE_MODEL_ID, provider: TENCENT_VOD_PROVIDER_KEY, type: 'Image', customParams: buildVodCustomParams('image') },
+                    { id: VOD_VIDEO_MODEL_ID, provider: TENCENT_VOD_PROVIDER_KEY, type: 'Video', durations: ['5s', '10s'], customParams: buildVodCustomParams('video') },
                 ];
                 vodModels.forEach(vm => {
-                    const idx = configs.findIndex(c => c.id === vm.id);
-                    if (idx === -1) {
-                        // 不存在 → 追加
-                        configs.push(vm);
-                    } else if (configs[idx].provider !== TENCENT_VOD_PROVIDER_KEY) {
-                        // 存在但 provider 不对 → 修正
-                        configs[idx] = { ...configs[idx], provider: TENCENT_VOD_PROVIDER_KEY };
-                    }
+                    const matches = configs.filter(c => c.id === vm.id);
+                    configs = configs.filter(c => c.id !== vm.id);
+                    const kept = matches[0] || {};
+                    const vodType = getVodConfigType(vm);
+                    const selection = vodType ? getVodSelectionFromCustomParams(vodType, kept.customParams || vm.customParams) : null;
+                    configs.push({
+                        ...kept,
+                        ...vm,
+                        customParams: vodType && selection
+                            ? buildVodCustomParamsWithSelection(vodType, selection.modelName, selection.modelVersion)
+                            : vm.customParams,
+                        id: vm.id,
+                        modelName: vm.id,
+                        displayName: vm.id,
+                        provider: TENCENT_VOD_PROVIDER_KEY
+                    });
                 });
 
                 // V3.8.2: Ensure every config has a unique internal ID for UI rendering stability
@@ -9184,6 +9274,29 @@ function TapnowApp() {
                 normalizeSettingModel('chatModel');
                 normalizeSettingModel('imageModel');
 
+                if ((node.type === 'gen-image' || node.type === 'gen-video') && settings?.model) {
+                    const resolvedModel = resolveModelKey(settings.model);
+                    const config = getApiConfigByKey(resolvedModel);
+                    const hasCustomParams = Array.isArray(config?.customParams) && config.customParams.length > 0;
+                    if (hasCustomParams) {
+                        const current = settings.customParams && typeof settings.customParams === 'object' ? settings.customParams : {};
+                        const defaults = {};
+                        config.customParams.forEach((param, index) => {
+                            const paramId = param.id || param.name || `param-${index}`;
+                            const value = param.defaultValue;
+                            if (paramId && value !== undefined && value !== null && String(value).trim() !== '') {
+                                defaults[paramId] = String(value).trim();
+                            }
+                        });
+                        const merged = { ...defaults, ...current };
+                        if (JSON.stringify(merged) !== JSON.stringify(current)) {
+                            if (!settingsChanged) settings = { ...settings };
+                            settings.customParams = merged;
+                            settingsChanged = true;
+                        }
+                    }
+                }
+
                 if (Array.isArray(settings.shots)) {
                     let shotsChanged = false;
                     const nextShots = settings.shots.map(shot => {
@@ -9208,7 +9321,7 @@ function TapnowApp() {
             });
             return changed ? nextNodes : prev;
         });
-    }, [apiConfigs.length, resolveModelKey, setNodes]);
+    }, [apiConfigs.length, resolveModelKey, getApiConfigByKey, setNodes]);
 
     // V3.4.19: 统一获取 API 凭据 - 只从 Provider 获取，不再从 Model 获取
     const getApiCredentials = useCallback((modelId) => {
@@ -9347,6 +9460,7 @@ function TapnowApp() {
         const customParams = Array.isArray(config?.customParams) ? config.customParams : [];
         if (!customParams.length) return null;
         const values = currentValues || {};
+        const isVodParamGroup = customParams.some((param) => param?.id === 'vod-model-name' || param?.id === 'vod-model-version');
         const toSuggestionToken = (value, fallback = 'x') => {
             const normalized = String(value || '')
                 .trim()
@@ -9363,14 +9477,33 @@ function TapnowApp() {
                 onPointerDown={(e) => e.stopPropagation()}
                 onTouchStart={(e) => e.stopPropagation()}
             >
-                <div className={`text-[10px] font-medium ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('自定义参数')}</div>
+                <div className={`text-[10px] font-semibold flex items-center justify-between ${isVodParamGroup ? (theme === 'dark' ? 'text-cyan-300' : 'text-cyan-700') : (theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600')}`}>
+                    <span>{isVodParamGroup ? '腾讯云 VOD 模型选择' : t('自定义参数')}</span>
+                    {isVodParamGroup && <span className="text-[9px] opacity-70">ModelName / ModelVersion</span>}
+                </div>
                 {customParams.map((param, index) => {
                     const paramId = param.id || param.name || `param-${index}`;
                     const selectedValueRaw = getCustomParamSelection(param, values);
                     const selectedValue = selectedValueRaw === null || selectedValueRaw === undefined
                         ? ''
                         : String(selectedValueRaw);
-                    const options = Array.isArray(param.values) ? param.values : [];
+                    let options = Array.isArray(param.values) ? param.values : [];
+                    if (param.versionMap && (param.name === 'ModelVersion' || param.id === 'vod-model-version')) {
+                        const modelNameParam = customParams.find((p) => (
+                            p.id === param.dependsOn
+                            || p.name === param.dependsOn
+                            || p.id === 'vod-model-name'
+                            || p.name === 'ModelName'
+                        ));
+                        const selectedModelName = modelNameParam
+                            ? (getCustomParamSelection(modelNameParam, values) || modelNameParam.defaultValue || '')
+                            : '';
+                        const versionOptions = param.versionMap[selectedModelName];
+                        if (Array.isArray(versionOptions) && versionOptions.length > 0) {
+                            options = versionOptions;
+                        }
+                    }
+                    const safeSelectedValue = selectedValue && options.includes(selectedValue) ? selectedValue : '';
                     const inputMode = isCustomParamInputMode(param);
                     const filteredOptions = options.filter((option) => !/^(input|输入)$/i.test(String(option || '').trim()));
                     const datalistId = filteredOptions.length > 0
@@ -9426,13 +9559,18 @@ function TapnowApp() {
                                 </>
                             ) : options.length > 0 ? (
                                 <select
-                                    value={selectedValue || ''}
+                                    value={safeSelectedValue || ''}
                                     onChange={(e) => {
                                         const nextValue = e.target.value;
                                         const next = { ...values };
                                         clearParamSelection(next);
                                         if (nextValue) {
                                             next[paramId] = nextValue;
+                                        }
+                                        if (param.id === 'vod-model-name' || param.name === 'ModelName') {
+                                            delete next['vod-model-version'];
+                                            delete next.ModelVersion;
+                                            delete next.modelVersion;
                                         }
                                         onChange(next);
                                     }}
@@ -11812,6 +11950,32 @@ function TapnowApp() {
         }
         return c;
     }));
+    const updateVodApiModelSelection = (api, vodConfigType, modelName, modelVersion) => {
+        if (!api || !vodConfigType) return;
+        const customParams = buildVodCustomParamsWithSelection(vodConfigType, modelName, modelVersion);
+        const nextModelName = customParams.find((param) => param.id === 'vod-model-name')?.defaultValue || '';
+        const nextModelVersion = customParams.find((param) => param.id === 'vod-model-version')?.defaultValue || '';
+        updateApiConfig(api._uid, { customParams });
+        setNodes((prev) => prev.map((node) => {
+            const nodeModel = node?.settings?.model;
+            const shouldSync = (node.type === 'gen-image' || node.type === 'gen-video')
+                && (nodeModel === api.id || nodeModel === api._uid || nodeModel === api.modelName);
+            if (!shouldSync) return node;
+            return {
+                ...node,
+                settings: {
+                    ...node.settings,
+                    customParams: {
+                        ...(node.settings?.customParams || {}),
+                        'vod-model-name': nextModelName,
+                        'vod-model-version': nextModelVersion,
+                        ModelName: nextModelName,
+                        ModelVersion: nextModelVersion
+                    }
+                }
+            };
+        }));
+    };
     const deleteApiConfig = (uid) => {
         setApiConfigs((prev) => prev.filter((c) => c._uid !== uid));
         setEditingApiModels(prev => {
@@ -16322,7 +16486,7 @@ function TapnowApp() {
                 setSettingsOpen(true);
                 return;
             }
-            const vodSubModel = resolveVodSubModel(type, customParamSelections);
+            const vodSubModel = resolveVodSubModel(type, customParamSelections, resolvedCustomParams);
             if (!vodSubModel.modelName || !vodSubModel.modelVersion) {
                 alert(t('请在节点自定义参数中选择 ModelName 和 ModelVersion'));
                 return;
@@ -33416,7 +33580,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         );
                                         if (!customParamsView) return null;
                                         return (
-                                            <div className="mb-2">
+                                            <div className={`mb-2 rounded-lg border p-2 ${theme === 'dark' ? 'bg-cyan-950/20 border-cyan-900/40' : 'bg-cyan-50 border-cyan-200'}`}>
                                                 {customParamsView}
                                             </div>
                                         );
@@ -33986,7 +34150,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                             className={`font-bold text-sm tracking-wide ${theme === 'dark' ? 'text-zinc-200' : 'text-zinc-800'
                                 }`}
                         >
-                            Tapnow Studio
+                            VodStudio
                         </span>
                         {/* 功能4：项目名称编辑 */}
                         {isEditingProjectName ? (
@@ -37395,6 +37559,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     <div className="space-y-1.5">
                                                         {group.models.map(api => {
                                                             const isEditing = editingApiModels.has(api._uid);
+                                                            const vodConfigType = getVodConfigType(api);
+                                                            const vodSelection = vodConfigType ? getVodSelectionFromCustomParams(vodConfigType, api.customParams) : null;
+                                                            const vodModelOptions = vodConfigType ? Object.keys(getVodMatrixByType(vodConfigType)) : [];
+                                                            const vodVersionOptions = vodSelection?.versions || [];
                                                             const libraryLabel = api.libraryId
                                                                 ? (modelLibraryMap.get(api.libraryId)?.displayName
                                                                     || modelLibraryMap.get(api.libraryId)?.modelName
@@ -37504,6 +37672,62 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         <span>{t('API模型：')}{api.modelName || api.id}</span>
                                                                         <span>{t('接口：')}{resolvedApiType}</span>
                                                                     </div>
+                                                                    {vodConfigType && vodSelection && (
+                                                                        <div className={`rounded-lg border p-2 ${theme === 'dark'
+                                                                            ? 'bg-cyan-950/20 border-cyan-900/50'
+                                                                            : 'bg-cyan-50 border-cyan-200'
+                                                                            }`}>
+                                                                            <div className="flex items-center justify-between mb-2">
+                                                                                <div className={`text-[10px] font-semibold ${theme === 'dark' ? 'text-cyan-300' : 'text-cyan-700'}`}>
+                                                                                    {vodConfigType === 'video' ? 'VOD 生视频模型' : 'VOD 生图模型'}
+                                                                                </div>
+                                                                                <div className={`text-[9px] ${theme === 'dark' ? 'text-cyan-500' : 'text-cyan-600'}`}>
+                                                                                    ModelName / ModelVersion
+                                                                                </div>
+                                                                            </div>
+                                                                            <div className="grid grid-cols-2 gap-2">
+                                                                                <div className="space-y-1">
+                                                                                    <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>ModelName</label>
+                                                                                    <select
+                                                                                        value={vodSelection.modelName}
+                                                                                        onChange={(e) => {
+                                                                                            const nextModelName = e.target.value;
+                                                                                            const nextVersion = getVodMatrixByType(vodConfigType)[nextModelName]?.[0] || '';
+                                                                                            updateVodApiModelSelection(api, vodConfigType, nextModelName, nextVersion);
+                                                                                        }}
+                                                                                        disabled={!isEditing}
+                                                                                        className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                            ? 'bg-zinc-900 border-zinc-800 text-zinc-300'
+                                                                                            : 'bg-white border-zinc-300 text-zinc-900'
+                                                                                            } ${!isEditing ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                                                                    >
+                                                                                        {vodModelOptions.map((name) => (
+                                                                                            <option key={name} value={name}>{name}</option>
+                                                                                        ))}
+                                                                                    </select>
+                                                                                </div>
+                                                                                <div className="space-y-1">
+                                                                                    <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>ModelVersion</label>
+                                                                                    <select
+                                                                                        value={vodSelection.modelVersion}
+                                                                                        onChange={(e) => updateVodApiModelSelection(api, vodConfigType, vodSelection.modelName, e.target.value)}
+                                                                                        disabled={!isEditing}
+                                                                                        className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                            ? 'bg-zinc-900 border-zinc-800 text-zinc-300'
+                                                                                            : 'bg-white border-zinc-300 text-zinc-900'
+                                                                                            } ${!isEditing ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                                                                    >
+                                                                                        {vodVersionOptions.map((version) => (
+                                                                                            <option key={version} value={version}>{version}</option>
+                                                                                        ))}
+                                                                                    </select>
+                                                                                </div>
+                                                                            </div>
+                                                                            <div className={`mt-2 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'}`}>
+                                                                                选项来自腾讯云 VOD {vodConfigType === 'video' ? 'CreateAigcVideoTask' : 'CreateAigcImageTask'} 文档；修改后会作为该模型的默认调用配置。
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
                                                                 </div>
                                                             );
                                                         })}

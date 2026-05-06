@@ -24,16 +24,22 @@ export const VOD_VIDEO_MODEL_ID = 'vod-aigc-video';
 export const VOD_API_VERSION = '2018-07-17';
 export const VOD_API_HOST = 'vod.tencentcloudapi.com';
 export const VOD_SERVICE = 'vod';
+export const VOD_DEFAULT_IMAGE_MODEL_NAME = 'GG';
+export const VOD_DEFAULT_IMAGE_MODEL_VERSION = '2.5';
+export const VOD_DEFAULT_VIDEO_MODEL_NAME = 'GV';
+export const VOD_DEFAULT_VIDEO_MODEL_VERSION = '3.1-fast';
 
 // ModelName / ModelVersion 支持矩阵（来自官方文档 2026-04）
 export const VOD_IMAGE_MODEL_MATRIX = {
+    OG: ['image2_low', 'image2_medium', 'image2_high'],
     GG: ['2.5', '3.0', '3.1'],
-    Jimeng: ['4.0'],
     SI: ['4.0', '4.5', '5.0-lite'],
     Qwen: ['0925'],
     Hunyuan: ['3.0'],
     Vidu: ['q2'],
-    Kling: ['2.1', '3.0', '3.0-Omni', 'O1']
+    Kling: ['2.1', '3.0', '3.0-Omni', 'O1'],
+    // 官方 ModelName 枚举未列出 Jimeng，但 ModelVersion 描述中出现 4.0；保留作兼容选项
+    Jimeng: ['4.0']
 };
 export const VOD_VIDEO_MODEL_MATRIX = {
     Hailuo: ['02', '2.3', '2.3-fast'],
@@ -665,19 +671,34 @@ export function isVodModel(modelId) {
  * 从节点 customParam 选择结果里解析出 VOD 需要的 ModelName / ModelVersion。
  * 约定：customParams 里会有两个参数 "ModelName" 和 "ModelVersion"
  */
-export function resolveVodSubModel(type, customParamSelections) {
+export function resolveVodSubModel(type, customParamSelections, customParams = []) {
     const sel = customParamSelections || {};
-    const modelName = String(sel.ModelName || sel.modelName || '').trim();
-    const modelVersion = String(sel.ModelVersion || sel.modelVersion || '').trim();
     const matrix = type === 'video' ? VOD_VIDEO_MODEL_MATRIX : VOD_IMAGE_MODEL_MATRIX;
-    // 提供 fallback：如果未选择，用矩阵中第一个
-    if (!modelName) {
-        const firstName = Object.keys(matrix)[0];
-        return { modelName: firstName, modelVersion: matrix[firstName][0] };
-    }
+    const defaultModelName = type === 'video' ? VOD_DEFAULT_VIDEO_MODEL_NAME : VOD_DEFAULT_IMAGE_MODEL_NAME;
+    const defaultModelVersion = type === 'video' ? VOD_DEFAULT_VIDEO_MODEL_VERSION : VOD_DEFAULT_IMAGE_MODEL_VERSION;
+
+    const pickSelection = (names, ids = []) => {
+        for (const key of [...ids, ...names]) {
+            const value = sel[key];
+            if (value !== undefined && value !== null && String(value).trim() !== '') return String(value).trim();
+        }
+        for (const param of customParams || []) {
+            const paramName = String(param?.name || '').trim();
+            const paramId = String(param?.id || '').trim();
+            if (!names.includes(paramName) && !ids.includes(paramId)) continue;
+            const value = sel[paramId] ?? sel[paramName] ?? param.defaultValue;
+            if (value !== undefined && value !== null && String(value).trim() !== '') return String(value).trim();
+        }
+        return '';
+    };
+
+    let modelName = pickSelection(['ModelName', 'modelName'], ['vod-model-name']) || defaultModelName;
+    if (!matrix[modelName]) modelName = defaultModelName;
     const versions = matrix[modelName] || [];
+    const modelVersion = pickSelection(['ModelVersion', 'modelVersion'], ['vod-model-version']);
+    const fallbackVersion = versions.includes(defaultModelVersion) ? defaultModelVersion : versions[0] || '';
     return {
         modelName,
-        modelVersion: modelVersion && versions.includes(modelVersion) ? modelVersion : versions[0] || ''
+        modelVersion: modelVersion && versions.includes(modelVersion) ? modelVersion : fallbackVersion
     };
 }
