@@ -1,7 +1,7 @@
 {
-  "name": "tapnow-studio",
+  "name": "vodstudio",
   "private": true,
-  "version": "3.8.8-rc7",
+  "version": "v1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
