@@ -1,6 +1,6 @@
-# Tapnow-Studio-PP
+# vodstuido
 
-自原作者 zhengxinlan1995-code 的 2.6.1 版本以来到 3.8.7 版本（截至 2026-02-12）持续进行高频迭代与修复，包含多次里程碑版本与重构，目前已进化为功能较为完善的工作流设计生产平台。
+Fork 自 Tapnow-Studio-PP 项目，增加了腾讯云VOD和Tokenhub调用逻辑，用于运行测试。
 
 ## 🌟 核心工作内容 (Highlights)
 相比于原始项目，我们在以下方面进行了重大改进：
@@ -11,11 +11,6 @@
 *   **数据持久化**: 彻底解决了 Blob URL 失效问题，所有资产自动同步至本地存储，支持 ZIP 批量导出。
 *   **模型库与请求模板**: 模型能力统一管理，支持请求模板预览/覆盖，便于供应商模型对接。
 *   **模型库说明书**: 统一配置与测试说明见 [**模型库说明**](./model-template-readme.md)。
-*   **本地服务说明书**:  接收器说明见 [**本地服务说明**](./localserver/LocalServer_README.md) 本地 ComfyUI_Proxy参见 [**ComfyUI 代理说明**](./localserver/Middleware_README-ComfyUI.md)
-*   **Docker 部署说明**: 前端 + 本地接收器双容器部署见 [**Docker_README**](./localserver/Docker_README.md)。
-*   **本地 Jimeng-API 7z 一键包**: 解压后运行，Base URL 指向 `http://localhost:5100`，API Key 使用 `sessionid`。
-*   **国际化基础**: 引入 i18n 基础设施，逐步支持中英文切换与文案维护。
-
 ---
 
 # 🎨 麻衣画布  (Original Project)
