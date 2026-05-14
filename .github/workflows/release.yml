@@ -28,11 +28,33 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
       - name: Install dependencies
         run: npm ci
 
       - name: Build dist
         run: npm run build
+
+      - name: Build proxy binaries
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          targets=(
+            "linux amd64 proxy-server-linux-amd64"
+            "linux arm64 proxy-server-linux-arm64"
+            "darwin amd64 proxy-server-macos-amd64"
+            "darwin arm64 proxy-server-macos-arm64"
+          )
+
+          for target in "${targets[@]}"; do
+            read -r GOOS GOARCH OUT <<< "$target"
+            echo "building $OUT"
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w" -o "release-assets/$OUT" ./proxy-server.go
+          done
 
       - name: Read package version
         id: pkg
@@ -50,9 +72,8 @@ jobs:
       - name: Prepare release assets
         shell: bash
         run: |
-          mkdir -p release-assets
           cp dist/index.html "release-assets/index.html"
-          shasum -a 256 release-assets/index.html > release-assets/SHA256SUMS.txt
+          shasum -a 256 release-assets/* > release-assets/SHA256SUMS.txt
           ls -lh release-assets
 
       - name: Create or update GitHub Release
@@ -67,20 +88,19 @@ jobs:
 
           Assets:
           - index.html: built single-file HTML from dist/index.html
+          - proxy-server-linux-amd64: Linux x86_64 CORS proxy binary
+          - proxy-server-linux-arm64: Linux arm64 CORS proxy binary
+          - proxy-server-macos-amd64: macOS Intel CORS proxy binary
+          - proxy-server-macos-arm64: macOS Apple Silicon CORS proxy binary
           - SHA256SUMS.txt: checksum file
           EOF
           )
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release delete-asset "$TAG" "VodStudio-V${VERSION}.html" -y >/dev/null 2>&1 || true
-            gh release upload "$TAG" \
-              release-assets/index.html \
-              release-assets/SHA256SUMS.txt \
-              --clobber
+            gh release upload "$TAG" release-assets/* --clobber
           else
-            gh release create "$TAG" \
-              release-assets/index.html \
-              release-assets/SHA256SUMS.txt \
+            gh release create "$TAG" release-assets/* \
               --target "$GITHUB_SHA" \
               --title "VodStudio ${VERSION} (${GITHUB_SHA::7})" \
               --notes "$NOTES" \
