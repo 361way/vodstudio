@@ -75,6 +75,7 @@ import {
     VOD_DEFAULT_IMAGE_MODEL_VERSION,
     VOD_DEFAULT_VIDEO_MODEL_NAME,
     VOD_DEFAULT_VIDEO_MODEL_VERSION,
+    VOD_API_HOST,
     isVodModel,
     parseVodCredentials,
     resolveVodSubModel,
@@ -1814,6 +1815,7 @@ const VIDEO_TASK_TIMEOUT_MS = 5 * 60 * 1000;
 
 // --- 默认配置 ---
 const DEFAULT_BASE_URL = 'https://ai.comfly.chat';
+const TENCENT_VOD_BASE_URL = `https://${VOD_API_HOST}`;
 
 // 即梦API配置（代理地址，默认本地5100端口）
 const JIMENG_API_BASE_URL = 'http://localhost:5100';
@@ -1827,9 +1829,8 @@ const DEFAULT_PROVIDERS = {
     'midjourney': { key: '', url: 'https://api.midjourney.com', apiType: 'openai', useProxy: false, forceAsync: false },
     'jimeng': { key: '', url: JIMENG_API_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
     'grok': { key: '', url: 'https://ai.t8star.cn', apiType: 'openai', useProxy: false, forceAsync: false },
-    'yunwu': { key: '', url: 'https://yunwu.ai', apiType: 'gemini', useProxy: false, forceAsync: false },
-    // 腾讯云 VOD AIGC（key 格式：SecretId|SecretKey|SubAppId|Region）
-    'tencent-vod': { key: '', url: 'https://vod.tencentcloudapi.com', apiType: 'tencent-vod', useProxy: true, forceAsync: true },
+    // 腾讯云 VOD AIGC（key 格式：SecretId|SecretKey|SubAppId|Region；Base URL 为官方域名，请求经 CORS 转发通道发送）
+    'tencent-vod': { key: '', url: TENCENT_VOD_BASE_URL, apiType: 'tencent-vod', useProxy: true, forceAsync: true },
 };
 
 const getVodMatrixByType = (type) => type === 'video' ? VOD_VIDEO_MODEL_MATRIX : VOD_IMAGE_MODEL_MATRIX;
@@ -1857,8 +1858,8 @@ const buildVodCustomParams = (type) => {
     const defaultModelName = getVodDefaultModelNameByType(type);
     const defaultModelVersion = getVodDefaultModelVersionByType(type);
     const modelNameNotes = isVideo
-        ? { Kling: 'Kling（可灵）', Vidu: 'Vidu', Hailuo: 'Hailuo（海螺）', Jimeng: 'Jimeng（即梦）', Hunyuan: 'Hunyuan（混元）', Mingmou: 'Mingmou（明眸）', GV: 'GV', OS: 'OS', PixVerse: 'PixVerse' }
-        : { OG: 'OG', GG: 'GG', SI: 'SI', Qwen: 'Qwen', Hunyuan: 'Hunyuan（混元）', Vidu: 'Vidu', Kling: 'Kling（可灵）', Jimeng: 'Jimeng（兼容）' };
+        ? { Kling: 'Kling（可灵）', Vidu: 'Vidu', Hailuo: 'Hailuo（海螺）', Hunyuan: 'Hunyuan（混元）', Mingmou: 'Mingmou（明眸）', GV: 'GV', OS: 'OS', PixVerse: 'PixVerse' }
+        : { OG: 'OG', GG: 'GG', SI: 'SI', Qwen: 'Qwen', Hunyuan: 'Hunyuan（混元）', Vidu: 'Vidu', Kling: 'Kling（可灵）' };
     return [
         {
             id: 'vod-model-name',
@@ -1924,7 +1925,6 @@ const DEFAULT_API_CONFIGS = [
     // Image Models
     { id: 'MJ V6', provider: 'midjourney', type: 'Image' },
     { id: 'gpt-4o-image', provider: 'openai', type: 'Image' },
-    { id: 'gemini-3-pro-image-preview', provider: 'yunwu', type: 'Image' },
     { id: 'jimeng-4.5', provider: 'jimeng', type: 'Image' },
     { id: 'jimeng-4.1', provider: 'jimeng', type: 'Image' },
     { id: 'jimeng-4.0', provider: 'jimeng', type: 'Image' },
@@ -2043,12 +2043,15 @@ You must design a visual composition that tells the story through **8 distinct p
 // 已删除的模型ID列表（用于过滤）
 const DELETED_MODEL_IDS = [
     'gemini-image',
+    'gemini-3-pro-image-preview',
     'qwen-image',
     'doubao-seedream',
     'hailuo-02',
     'kling-v1-6',
     'wan-2.5'
 ];
+const REMOVED_PROVIDER_KEYS = ['yunwu'];
+const isRemovedProviderKey = (providerKey) => REMOVED_PROVIDER_KEYS.includes(String(providerKey || '').trim());
 
 const ASYNC_CONFIG_TEMPLATE = {
     enabled: true,
@@ -3538,7 +3541,7 @@ const normalizeModelLibraryEntry = (entry, index = 0) => {
 const migrateVodModelLibraryEntries = (entries) => {
     const source = Array.isArray(entries) ? entries : [];
     const canonicalVodIds = [VOD_IMAGE_MODEL_ID, VOD_VIDEO_MODEL_ID];
-    const result = source.filter((entry) => !canonicalVodIds.includes(entry?.id));
+    const result = source.filter((entry) => !canonicalVodIds.includes(entry?.id) && !DELETED_MODEL_IDS.includes(entry?.id));
     canonicalVodIds.forEach((id) => {
         const canonical = DEFAULT_MODEL_LIBRARY.find((entry) => entry.id === id);
         if (!canonical) return;
@@ -5454,11 +5457,21 @@ function TapnowApp() {
             useProxy: false,
             forceAsync: false
         };
-        return {
+        const merged = {
             ...defaults,
             ...config,
             enabled: config?.enabled !== false
         };
+        if (providerKey === TENCENT_VOD_PROVIDER_KEY || merged.apiType === 'tencent-vod') {
+            return {
+                ...merged,
+                apiType: 'tencent-vod',
+                url: TENCENT_VOD_BASE_URL,
+                useProxy: true,
+                forceAsync: true
+            };
+        }
+        return merged;
     };
 
     const [modelLibrary, setModelLibrary] = useState(() => {
@@ -5469,7 +5482,8 @@ function TapnowApp() {
                 if (Array.isArray(parsed)) {
                     const normalized = parsed
                         .map((entry, idx) => normalizeModelLibraryEntry(entry, idx))
-                        .filter(Boolean);
+                        .filter(Boolean)
+                        .filter((entry) => !DELETED_MODEL_IDS.includes(entry.id));
                     return migrateVodModelLibraryEntries(normalized);
                 }
             } catch (e) {
@@ -5607,8 +5621,8 @@ function TapnowApp() {
                     return rest;
                 });
 
-                // 过滤掉已删除的模型配置
-                configs = configs.filter(c => !DELETED_MODEL_IDS.includes(c.id));
+                // 过滤掉已删除的模型配置和 Provider
+                configs = configs.filter(c => !DELETED_MODEL_IDS.includes(c.id) && !isRemovedProviderKey(c.provider));
 
                 // V3.7.22: 允许同名模型共存（不再按 id 去重）
                 const existingIds = new Set(configs.map(c => c.id).filter(Boolean));
@@ -5670,7 +5684,9 @@ function TapnowApp() {
                 const parsed = JSON.parse(saved);
                 // 直接使用用户保存的数据，不再自动补充默认Provider
                 // 如果用户删除了一个Provider，它就不会再出现
-                return Object.fromEntries(Object.entries(parsed).map(([key, config]) => [key, normalizeProviderConfig(key, config)]));
+                return Object.fromEntries(Object.entries(parsed)
+                    .filter(([key]) => !isRemovedProviderKey(key))
+                    .map(([key, config]) => [key, normalizeProviderConfig(key, config)]));
             }
         } catch (e) {
             console.error('加载 providers 配置失败:', e);
@@ -9631,6 +9647,7 @@ function TapnowApp() {
         // 1. 初始化: 确保所有在 providers 中的供应商都显示 (即使没有模型)
         // V3.6.0: 直接使用 key 作为名称（用户可直接修改 key）
         Object.entries(providers).forEach(([key]) => {
+            if (isRemovedProviderKey(key)) return;
             groups[key] = {
                 name: key,
                 models: []
@@ -9639,7 +9656,7 @@ function TapnowApp() {
 
         // 2. 填充模型
         apiConfigs.forEach(config => {
-            if (DELETED_MODEL_IDS.includes(config.id)) return;
+            if (DELETED_MODEL_IDS.includes(config.id) || isRemovedProviderKey(config.provider)) return;
             const resolved = resolveApiConfig(config);
             if (!resolved) return;
             if (resolved.disabled) return;
@@ -10549,6 +10566,26 @@ function TapnowApp() {
         const localY = rect ? sy - rect.top : sy;
         return { x: (localX - view.x) / view.zoom, y: (localY - view.y) / view.zoom };
     }, [view]);
+
+    const zoomCanvasView = useCallback((direction) => {
+        const rect = canvasRef.current?.getBoundingClientRect();
+        const centerX = rect ? rect.width / 2 : window.innerWidth / 2;
+        const centerY = rect ? rect.height / 2 : window.innerHeight / 2;
+        setView((prev) => {
+            const factor = direction > 0 ? 1.18 : 1 / 1.18;
+            const nextZoom = Math.min(Math.max(prev.zoom * factor, 0.2), 3);
+            const scale = nextZoom / prev.zoom;
+            return {
+                zoom: nextZoom,
+                x: centerX - (centerX - prev.x) * scale,
+                y: centerY - (centerY - prev.y) * scale
+            };
+        });
+    }, []);
+
+    const resetCanvasView = useCallback(() => {
+        setView({ ...DEFAULT_VIEW });
+    }, []);
 
     const handleWheel = (e) => {
         // 如果按下了 Ctrl 键，直接阻止默认行为并不执行任何操作；使用 try-catch 避免控制台报错
@@ -16475,9 +16512,17 @@ function TapnowApp() {
         if (isVodModel(actualModelId)) {
             const vodTaskId = options._existingTaskId || `vod-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             const vodSourceNodeId = node?.id || nodeId || null;
-            const vodProvider = providers[TENCENT_VOD_PROVIDER_KEY] || {};
-            const vodUseProxy = !!vodProvider.useProxy;
+            const vodProvider = normalizeProviderConfig(TENCENT_VOD_PROVIDER_KEY, providers[TENCENT_VOD_PROVIDER_KEY] || {});
+            const vodUseProxy = true;
+            const vodProxyBase = (localServerUrl || 'http://127.0.0.1:9527').trim().replace(/\/+$/, '');
             const vodStartTime = Date.now();
+            try {
+                const pingResp = await fetch(`${vodProxyBase}/ping`, { method: 'GET' });
+                if (!pingResp.ok) throw new Error(`HTTP ${pingResp.status}`);
+            } catch (err) {
+                alert(`腾讯云 VOD 调用需要启动本地 CORS 转发服务：\n\nnode proxy-server.mjs\n\n当前无法连接 ${vodProxyBase}/ping：${err?.message || err}`);
+                return;
+            }
             let vodCreds;
             try {
                 vodCreds = parseVodCredentials(vodProvider);
@@ -16507,7 +16552,7 @@ function TapnowApp() {
                     status: 'generating',
                     progress: 5,
                     modelName: `VOD/${vodSubModel.modelName} ${vodSubModel.modelVersion}`,
-                    apiConfig: { modelId, baseUrl: 'https://vod.tencentcloudapi.com', apiKey: '', provider: TENCENT_VOD_PROVIDER_KEY, useProxy: vodUseProxy },
+                    apiConfig: { modelId, baseUrl: TENCENT_VOD_BASE_URL, apiKey: '', provider: TENCENT_VOD_PROVIDER_KEY, useProxy: vodUseProxy },
                     provider: TENCENT_VOD_PROVIDER_KEY,
                     useProxy: vodUseProxy,
                     sourceNodeId: vodSourceNodeId,
@@ -17103,7 +17148,7 @@ function TapnowApp() {
                     };
                     if (aspect) payload.aspect_ratio = aspect;
                 }
-                // 0.5 Gemini Native (Yunwu/VibeCoding)
+                // 0.5 Gemini Native
                 else if (isGeminiNative) {
                     const modelName = config?.modelName || 'gemini-3-pro-image-preview';
                     const parts = [];
@@ -35731,6 +35776,42 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     }}
                                 />
                             )}
+
+                            <div
+                                className={`absolute bottom-4 right-4 z-40 flex items-center gap-1 rounded-full border px-1.5 py-1 shadow-lg backdrop-blur-md ${theme === 'dark'
+                                    ? 'bg-zinc-950/80 border-zinc-800 text-zinc-200'
+                                    : theme === 'solarized'
+                                        ? 'bg-[#eee8d5]/90 border-[#d7cfb2] text-zinc-700'
+                                        : 'bg-white/90 border-zinc-200 text-zinc-700'
+                                    }`}
+                                onMouseDown={(e) => e.stopPropagation()}
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <button
+                                    type="button"
+                                    onClick={() => zoomCanvasView(-1)}
+                                    className={`w-8 h-8 rounded-full text-lg leading-none flex items-center justify-center transition-colors ${theme === 'dark' ? 'hover:bg-zinc-800' : 'hover:bg-zinc-100'}`}
+                                    title={t('缩小视图')}
+                                >
+                                    −
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={resetCanvasView}
+                                    className={`min-w-[52px] h-8 rounded-full px-2 text-[11px] font-mono transition-colors ${theme === 'dark' ? 'hover:bg-zinc-800 text-zinc-300' : 'hover:bg-zinc-100 text-zinc-600'}`}
+                                    title={t('重置视图')}
+                                >
+                                    {Math.round(view.zoom * 100)}%
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => zoomCanvasView(1)}
+                                    className={`w-8 h-8 rounded-full text-lg leading-none flex items-center justify-center transition-colors ${theme === 'dark' ? 'hover:bg-zinc-800' : 'hover:bg-zinc-100'}`}
+                                    title={t('放大视图')}
+                                >
+                                    +
+                                </button>
+                            </div>
                         </div>
 
                         {/* Chat Sidebar Panel */}
@@ -37454,9 +37535,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     <div className="grid grid-cols-4 items-center gap-2">
                                                         <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('接口类型')}</label>
                                                         <select
-                                                            value={providers[providerKey]?.apiType || 'openai'}
-                                                            onChange={(e) => setProviders(prev => ({ ...prev, [providerKey]: { ...prev[providerKey], apiType: e.target.value } }))}
-                                                            className={`col-span-3 w-full rounded px-2 py-1 text-xs outline-none focus:border-blue-600/50 border ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'}`}
+                                                            value={(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? 'tencent-vod' : (providers[providerKey]?.apiType || 'openai')}
+                                                            onChange={(e) => {
+                                                                if (providerKey === TENCENT_VOD_PROVIDER_KEY) return;
+                                                                setProviders(prev => ({ ...prev, [providerKey]: normalizeProviderConfig(providerKey, { ...prev[providerKey], apiType: e.target.value }) }));
+                                                            }}
+                                                            disabled={providerKey === TENCENT_VOD_PROVIDER_KEY}
+                                                            className={`col-span-3 w-full rounded px-2 py-1 text-xs outline-none focus:border-blue-600/50 border ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'} ${providerKey === TENCENT_VOD_PROVIDER_KEY ? 'opacity-70 cursor-not-allowed' : ''}`}
                                                         >
                                                             <option value="openai">OpenAI</option>
                                                             <option value="gemini">Gemini</option>
@@ -37467,21 +37552,27 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     <div className="grid grid-cols-4 items-center gap-2">
                                                         <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('本地代理')}</label>
                                                         <div className="col-span-3 flex items-center gap-2">
-                                                            <label className="relative inline-flex items-center cursor-pointer">
+                                                            <label className={`relative inline-flex items-center ${(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
                                                                 <input
                                                                     type="checkbox"
-                                                                    checked={!!providers[providerKey]?.useProxy}
-                                                                    onChange={(e) => setProviders(prev => ({ ...prev, [providerKey]: { ...prev[providerKey], useProxy: e.target.checked } }))}
+                                                                    checked={(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? true : !!providers[providerKey]?.useProxy}
+                                                                    onChange={(e) => {
+                                                                        if (providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') return;
+                                                                        setProviders(prev => ({ ...prev, [providerKey]: { ...prev[providerKey], useProxy: e.target.checked } }));
+                                                                    }}
+                                                                    disabled={providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod'}
                                                                     className="sr-only peer"
                                                                 />
-                                                                <div className={`w-9 h-5 rounded-full peer peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-500/50 ${providers[providerKey]?.useProxy
+                                                                <div className={`w-9 h-5 rounded-full peer peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-500/50 ${(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod')
                                                                     ? 'bg-blue-600'
-                                                                    : theme === 'dark'
-                                                                        ? 'bg-zinc-700'
-                                                                        : 'bg-zinc-300'
+                                                                    : providers[providerKey]?.useProxy
+                                                                        ? 'bg-blue-600'
+                                                                        : theme === 'dark'
+                                                                            ? 'bg-zinc-700'
+                                                                            : 'bg-zinc-300'
                                                                     } peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all`}></div>
                                                             </label>
-                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>使用 {localServerUrl || 'http://127.0.0.1:9527'}/proxy</span>
+                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? `经 ${localServerUrl || 'http://127.0.0.1:9527'}/proxy 转发到 ${TENCENT_VOD_BASE_URL}` : `使用 ${localServerUrl || 'http://127.0.0.1:9527'}/proxy`}</span>
                                                         </div>
                                                     </div>
                                                     <div className="grid grid-cols-4 items-center gap-2">
@@ -37490,18 +37581,24 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             <label className="relative inline-flex items-center cursor-pointer">
                                                                 <input
                                                                     type="checkbox"
-                                                                    checked={!!providers[providerKey]?.forceAsync}
-                                                                    onChange={(e) => setProviders(prev => ({ ...prev, [providerKey]: { ...prev[providerKey], forceAsync: e.target.checked } }))}
+                                                                    checked={(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? true : !!providers[providerKey]?.forceAsync}
+                                                                    onChange={(e) => {
+                                                                        if (providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') return;
+                                                                        setProviders(prev => ({ ...prev, [providerKey]: { ...prev[providerKey], forceAsync: e.target.checked } }));
+                                                                    }}
+                                                                    disabled={providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod'}
                                                                     className="sr-only peer"
                                                                 />
-                                                                <div className={`w-9 h-5 rounded-full peer peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-500/50 ${providers[providerKey]?.forceAsync
+                                                                <div className={`w-9 h-5 rounded-full peer peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-500/50 ${(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod')
                                                                     ? 'bg-blue-600'
-                                                                    : theme === 'dark'
-                                                                        ? 'bg-zinc-700'
-                                                                        : 'bg-zinc-300'
+                                                                    : providers[providerKey]?.forceAsync
+                                                                        ? 'bg-blue-600'
+                                                                        : theme === 'dark'
+                                                                            ? 'bg-zinc-700'
+                                                                            : 'bg-zinc-300'
                                                                     } peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all`}></div>
                                                             </label>
-                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('ModelScope 建议开启')}</span>
+                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? 'VOD AIGC 固定异步任务' : t('ModelScope 建议开启')}</span>
                                                         </div>
                                                     </div>
                                                     <div className="grid grid-cols-4 items-center gap-2">
@@ -37511,19 +37608,79 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             value={providers[providerKey]?.key || ''}
                                                             onChange={(e) => setProviders(prev => ({ ...prev, [providerKey]: { ...prev[providerKey], key: e.target.value } }))}
                                                             className={`col-span-3 w-full rounded px-2 py-1 text-xs outline-none focus:border-blue-600/50 border ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'}`}
-                                                            placeholder="sk-..."
+                                                            placeholder={(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? 'SecretId|SecretKey|SubAppId|Region' : 'sk-...'}
                                                         />
                                                     </div>
                                                     <div className="grid grid-cols-4 items-center gap-2">
                                                         <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>Base URL</label>
                                                         <input
                                                             type="text"
-                                                            value={providers[providerKey]?.url || ''}
-                                                            onChange={(e) => setProviders(prev => ({ ...prev, [providerKey]: { ...prev[providerKey], url: e.target.value } }))}
-                                                            className={`col-span-3 w-full rounded px-2 py-1 text-xs outline-none focus:border-blue-600/50 border ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'}`}
+                                                            value={(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? TENCENT_VOD_BASE_URL : (providers[providerKey]?.url || '')}
+                                                            onChange={(e) => {
+                                                                if (providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') return;
+                                                                setProviders(prev => ({ ...prev, [providerKey]: { ...prev[providerKey], url: e.target.value } }));
+                                                            }}
+                                                            disabled={providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod'}
+                                                            className={`col-span-3 w-full rounded px-2 py-1 text-xs outline-none focus:border-blue-600/50 border ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'} ${(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? 'opacity-70 cursor-not-allowed' : ''}`}
                                                             placeholder="https://..."
                                                         />
                                                     </div>
+                                                    {(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') && (() => {
+                                                        const renderVodSelector = (vodType) => {
+                                                            const api = group.models.find((item) => getVodConfigType(item) === vodType);
+                                                            const selection = getVodSelectionFromCustomParams(vodType, api?.customParams);
+                                                            const modelOptions = Object.keys(getVodMatrixByType(vodType));
+                                                            const versionOptions = selection.versions || [];
+                                                            const title = vodType === 'video' ? '生视频模型' : '生图模型';
+                                                            return (
+                                                                <div className={`rounded-lg border p-2 ${theme === 'dark' ? 'bg-cyan-950/20 border-cyan-900/50' : 'bg-cyan-50 border-cyan-200'}`}>
+                                                                    <div className={`text-[10px] font-semibold mb-2 ${theme === 'dark' ? 'text-cyan-300' : 'text-cyan-700'}`}>Tencent VOD {title}</div>
+                                                                    <div className="grid grid-cols-2 gap-2">
+                                                                        <div className="space-y-1">
+                                                                            <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>ModelName</label>
+                                                                            <select
+                                                                                value={selection.modelName}
+                                                                                onChange={(e) => {
+                                                                                    if (!api) return;
+                                                                                    const nextModelName = e.target.value;
+                                                                                    const nextVersion = getVodMatrixByType(vodType)[nextModelName]?.[0] || '';
+                                                                                    updateVodApiModelSelection(api, vodType, nextModelName, nextVersion);
+                                                                                }}
+                                                                                disabled={!api}
+                                                                                className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'} ${!api ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                                                            >
+                                                                                {modelOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+                                                                            </select>
+                                                                        </div>
+                                                                        <div className="space-y-1">
+                                                                            <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>ModelVersion</label>
+                                                                            <select
+                                                                                value={selection.modelVersion}
+                                                                                onChange={(e) => api && updateVodApiModelSelection(api, vodType, selection.modelName, e.target.value)}
+                                                                                disabled={!api}
+                                                                                className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'} ${!api ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                                                            >
+                                                                                {versionOptions.map((version) => <option key={version} value={version}>{version}</option>)}
+                                                                            </select>
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        };
+                                                        return (
+                                                            <div className={`rounded-xl border p-3 ${theme === 'dark' ? 'border-cyan-900/50 bg-cyan-950/10' : 'border-cyan-200 bg-cyan-50/70'}`}>
+                                                                <div className="flex items-center justify-between mb-2">
+                                                                    <div className={`text-[10px] font-semibold uppercase tracking-wider ${theme === 'dark' ? 'text-cyan-300' : 'text-cyan-700'}`}>VOD 模型默认值</div>
+                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-cyan-500' : 'text-cyan-600'}`}>CreateAigcImageTask / CreateAigcVideoTask</div>
+                                                                </div>
+                                                                <div className="grid grid-cols-2 gap-2">
+                                                                    {renderVodSelector('image')}
+                                                                    {renderVodSelector('video')}
+                                                                </div>
+                                                                <div className={`mt-2 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'}`}>选项来自腾讯云 VOD 文档；保存后作为画布生图/生视频节点默认 ModelName 与 ModelVersion。</div>
+                                                            </div>
+                                                        );
+                                                    })()}
                                                 </div>
 
                                                 {/* 该 Provider 下的模型列表 */}
@@ -38070,7 +38227,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         className={`w-full text-xs rounded px-2 py-1 border outline-none ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'}`}
                                                                         value={entry.modelName || ''}
                                                                         onChange={(e) => updateModelLibraryEntry(entry.id, { modelName: e.target.value })}
-                                                                        placeholder={t('例如：gemini-3-pro-image-preview')}
+                                                                        placeholder={t('例如：gpt-4o-image')}
                                                                         disabled={!isEditing}
                                                                     />
                                                                 </div>

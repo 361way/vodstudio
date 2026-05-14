@@ -29,7 +29,7 @@ export const VOD_DEFAULT_IMAGE_MODEL_VERSION = '2.5';
 export const VOD_DEFAULT_VIDEO_MODEL_NAME = 'GV';
 export const VOD_DEFAULT_VIDEO_MODEL_VERSION = '3.1-fast';
 
-// ModelName / ModelVersion 支持矩阵（来自官方文档 2026-04）
+// ModelName / ModelVersion 支持矩阵（来自官方文档 2026-05）
 export const VOD_IMAGE_MODEL_MATRIX = {
     OG: ['image2_low', 'image2_medium', 'image2_high'],
     GG: ['2.5', '3.0', '3.1'],
@@ -37,14 +37,11 @@ export const VOD_IMAGE_MODEL_MATRIX = {
     Qwen: ['0925'],
     Hunyuan: ['3.0'],
     Vidu: ['q2'],
-    Kling: ['2.1', '3.0', '3.0-Omni', 'O1'],
-    // 官方 ModelName 枚举未列出 Jimeng，但 ModelVersion 描述中出现 4.0；保留作兼容选项
-    Jimeng: ['4.0']
+    Kling: ['2.1', '3.0', '3.0-Omni', 'O1']
 };
 export const VOD_VIDEO_MODEL_MATRIX = {
     Hailuo: ['02', '2.3', '2.3-fast'],
     Kling: ['1.6', '2.0', '2.1', '2.5', '2.6', 'O1', '3.0', '3.0-Omni'],
-    Jimeng: ['3.0pro'],
     Vidu: ['q2', 'q2-pro', 'q2-turbo', 'q3', 'q3-pro', 'q3-turbo'],
     GV: ['3.1', '3.1-fast'],
     OS: ['2.0'],
@@ -255,11 +252,25 @@ async function callVodApi(action, body, ctx) {
     const directUrl = `https://${VOD_API_HOST}`;
     const finalUrl = wrapProxy(directUrl, { useProxy, localServerUrl });
 
-    const resp = await fetch(finalUrl, {
-        method: 'POST',
-        headers: fetchHeaders,
-        body: payload
-    });
+    let resp;
+    try {
+        resp = await fetch(finalUrl, {
+            method: 'POST',
+            headers: fetchHeaders,
+            body: payload
+        });
+    } catch (err) {
+        if (!useProxy && localServerUrl) {
+            const proxyUrl = wrapProxy(directUrl, { useProxy: true, localServerUrl });
+            resp = await fetch(proxyUrl, {
+                method: 'POST',
+                headers: fetchHeaders,
+                body: payload
+            });
+        } else {
+            throw new Error(`[VOD/${action}] 网络请求失败，可能是浏览器 CORS 限制。请确认 CORS 转发服务可用: ${err?.message || err}`);
+        }
+    }
 
     const text = await resp.text();
     let json;
@@ -286,7 +297,7 @@ async function callVodApi(action, body, ctx) {
 /**
  * 从 Blob/File/URL/DataURL 解析得到 {blob, ext, mime}
  */
-async function resolveBlob(input) {
+async function resolveBlob(input, ctx = {}) {
     if (input instanceof Blob) {
         const mime = input.type || 'image/png';
         const ext = mimeToExt(mime);
@@ -294,7 +305,9 @@ async function resolveBlob(input) {
     }
     if (typeof input === 'string') {
         // data: URL 或普通 URL
-        const resp = await fetch(input);
+        const isHttpUrl = /^https?:\/\//i.test(input);
+        const targetUrl = isHttpUrl ? wrapProxy(input, ctx) : input;
+        const resp = await fetch(targetUrl);
         if (!resp.ok) throw new Error(`[VOD Upload] 获取图片失败: ${resp.status}`);
         const blob = await resp.blob();
         const mime = blob.type || 'image/png';
@@ -319,7 +332,7 @@ function mimeToExt(mime) {
  * 使用 VOD 返回的 TempCertificate，对 COS PUT Object 做简单上传签名。
  * 只签 host 头，最简方案。Token 通过 x-cos-security-token 头单独发送。
  */
-async function putObjectToCos({ tempCred, bucket, region, key, blob }) {
+async function putObjectToCos({ tempCred, bucket, region, key, blob }, ctx = {}) {
     const host = `${bucket}.cos.${region}.myqcloud.com`;
     const now = Math.floor(Date.now() / 1000);
     const exp = now + 3600;
@@ -350,16 +363,34 @@ async function putObjectToCos({ tempCred, bucket, region, key, blob }) {
     // URL 里的 key 需要按路径片段 encode（保留 /）
     const encodedKey = uriPathname.split('/').map((seg) => seg ? encodeURIComponent(seg) : '').join('/');
     const url = `https://${host}${encodedKey}`;
+    const finalUrl = wrapProxy(url, ctx);
 
-    const resp = await fetch(url, {
-        method: 'PUT',
-        headers: {
-            Authorization: authorization,
-            'x-cos-security-token': tempCred.Token
-            // 注意：不设 Host / Content-Length，浏览器会自动处理
-        },
-        body: blob
-    });
+    let resp;
+    try {
+        resp = await fetch(finalUrl, {
+            method: 'PUT',
+            headers: {
+                Authorization: authorization,
+                'x-cos-security-token': tempCred.Token
+                // 注意：不设 Host / Content-Length，浏览器会自动处理；代理会转发目标 Host
+            },
+            body: blob
+        });
+    } catch (err) {
+        if (!ctx.useProxy && ctx.localServerUrl) {
+            const proxyUrl = wrapProxy(url, { ...ctx, useProxy: true });
+            resp = await fetch(proxyUrl, {
+                method: 'PUT',
+                headers: {
+                    Authorization: authorization,
+                    'x-cos-security-token': tempCred.Token
+                },
+                body: blob
+            });
+        } else {
+            throw new Error(`[VOD Upload/COS PUT] 网络请求失败，可能是浏览器 CORS 限制。请确认 CORS 转发服务可用: ${err?.message || err}`);
+        }
+    }
     if (!resp.ok) {
         const text = await resp.text().catch(() => '');
         throw new Error(`[VOD Upload/COS PUT] HTTP ${resp.status}: ${text.slice(0, 300)}`);
@@ -374,7 +405,7 @@ async function putObjectToCos({ tempCred, bucket, region, key, blob }) {
  */
 export async function uploadImageToVod(imageInput, ctx) {
     const { credentials } = ctx;
-    const { blob, ext } = await resolveBlob(imageInput);
+    const { blob, ext } = await resolveBlob(imageInput, ctx);
 
     // 1) ApplyUpload
     const applyResp = await callVodApi('ApplyUpload', {
@@ -395,7 +426,7 @@ export async function uploadImageToVod(imageInput, ctx) {
         region: applyResp.StorageRegion,
         key: applyResp.MediaStoragePath,
         blob
-    });
+    }, ctx);
 
     // 3) CommitUpload
     const commitResp = await callVodApi('CommitUpload', {

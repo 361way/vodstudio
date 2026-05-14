@@ -10,6 +10,7 @@ const corsHeaders = {
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': '*',
     'Access-Control-Expose-Headers': '*',
+    'Access-Control-Allow-Private-Network': 'true',
     'Access-Control-Max-Age': '86400',
 };
 

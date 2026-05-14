@@ -40,7 +40,7 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           SAFE_SHA=${GITHUB_SHA::7}
-          TAG="v${VERSION}-${SAFE_SHA}"
+          TAG="${VERSION}-${SAFE_SHA}"
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
