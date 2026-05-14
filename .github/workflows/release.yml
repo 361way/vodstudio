@@ -44,10 +44,10 @@ jobs:
         run: |
           mkdir -p release-assets
           targets=(
-            "linux amd64 proxy-server-linux-amd64"
-            "linux arm64 proxy-server-linux-arm64"
-            "darwin amd64 proxy-server-macos-amd64"
-            "darwin arm64 proxy-server-macos-arm64"
+            "linux amd64 vodserver-linux-amd64"
+            "linux arm64 vodserver-linux-arm64"
+            "darwin amd64 vodserver-macos-amd64"
+            "darwin arm64 vodserver-macos-arm64"
           )
 
           for target in "${targets[@]}"; do

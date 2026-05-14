@@ -1,17 +1,33 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
 
 const port = 9527
+
+var cacheRoot = getCacheRoot()
+var configState = map[string]any{
+	"save_path":          cacheRoot,
+	"image_save_path":    filepath.Join(cacheRoot, "history"),
+	"video_save_path":    filepath.Join(cacheRoot, "history"),
+	"convert_png_to_jpg": false,
+	"jpg_quality":        95,
+	"pil_available":      false,
+}
+
+var safeSegmentPattern = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 var corsHeaders = map[string]string{
 	"Access-Control-Allow-Origin":          "*",
@@ -56,15 +72,22 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch r.URL.Path {
-	case "/ping":
-		writeJSON(w, http.StatusOK, map[string]string{
-			"status": "ok",
-			"time":   time.Now().UTC().Format(time.RFC3339Nano),
-		})
-	case "/list-files":
-		writeJSON(w, http.StatusOK, map[string]any{"files": []string{}})
-	case "/proxy":
+	switch {
+	case r.URL.Path == "/ping":
+		payload := map[string]any{"status": "ok", "time": time.Now().UTC().Format(time.RFC3339Nano)}
+		for key, value := range configState {
+			payload[key] = value
+		}
+		writeJSON(w, http.StatusOK, payload)
+	case r.URL.Path == "/config":
+		handleConfig(w, r)
+	case r.URL.Path == "/list-files":
+		writeJSON(w, http.StatusOK, map[string]any{"files": listCacheFiles()})
+	case r.URL.Path == "/save-cache":
+		handleSaveCache(w, r)
+	case strings.HasPrefix(r.URL.Path, "/file/"):
+		handleFile(w, r)
+	case r.URL.Path == "/proxy":
 		handleProxy(w, r)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{
@@ -72,6 +95,87 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			"path":  r.URL.Path,
 		})
 	}
+}
+
+func handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var patch map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "Invalid config payload", "detail": err.Error()})
+			return
+		}
+		for key, value := range patch {
+			configState[key] = value
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "config": configState})
+}
+
+func handleSaveCache(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+		return
+	}
+	var payload struct {
+		ID       string `json:"id"`
+		Content  string `json:"content"`
+		Category string `json:"category"`
+		Ext      string `json:"ext"`
+		Type     string `json:"type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "Invalid save payload", "detail": err.Error()})
+		return
+	}
+	category := sanitizeSegment(payload.Category, "history")
+	id := sanitizeSegment(payload.ID, fmt.Sprintf("cache-%d", time.Now().UnixMilli()))
+	ext := sanitizeSegment(strings.TrimPrefix(payload.Ext, "."), "jpg")
+	if ext == "jpg" && payload.Type == "video" {
+		ext = "mp4"
+	}
+	content, err := decodeCacheContent(payload.Content)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "Decode cache content failed", "detail": err.Error()})
+		return
+	}
+	relPath := filepath.ToSlash(filepath.Join(category, id+"."+ext))
+	outputPath := filepath.Join(cacheRoot, filepath.FromSlash(relPath))
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Create cache directory failed", "detail": err.Error()})
+		return
+	}
+	if err := os.WriteFile(outputPath, content, 0644); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Write cache file failed", "detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"url":     fmt.Sprintf("http://127.0.0.1:%d/file/%s", port, encodeRelPath(relPath)),
+		"path":    outputPath,
+		"relPath": relPath,
+	})
+}
+
+func handleFile(w http.ResponseWriter, r *http.Request) {
+	rel, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/file/"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid file path"})
+		return
+	}
+	rel = strings.TrimLeft(filepath.ToSlash(rel), "/")
+	target := filepath.Clean(filepath.Join(cacheRoot, filepath.FromSlash(rel)))
+	if target != cacheRoot && !strings.HasPrefix(target, cacheRoot+string(os.PathSeparator)) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Forbidden"})
+		return
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "File not found"})
+		return
+	}
+	applyCORS(w.Header())
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func handleProxy(w http.ResponseWriter, r *http.Request) {
@@ -118,6 +222,74 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 	applyCORS(w.Header())
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func getCacheRoot() string {
+	if raw := strings.TrimSpace(os.Getenv("VODSTUDIO_CACHE_DIR")); raw != "" {
+		if abs, err := filepath.Abs(raw); err == nil {
+			return abs
+		}
+		return raw
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "vodstudio-cache"
+	}
+	return filepath.Join(cwd, "vodstudio-cache")
+}
+
+func sanitizeSegment(value, fallback string) string {
+	raw := strings.ReplaceAll(strings.ReplaceAll(value, "\\", "-"), "/", "-")
+	safe := safeSegmentPattern.ReplaceAllString(raw, "-")
+	safe = strings.Trim(safe, "-")
+	if len(safe) > 120 {
+		safe = safe[:120]
+	}
+	if safe == "" {
+		return fallback
+	}
+	return safe
+}
+
+func decodeCacheContent(content string) ([]byte, error) {
+	if !strings.HasPrefix(content, "data:") {
+		return []byte(content), nil
+	}
+	parts := strings.SplitN(content, ",", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid data url")
+	}
+	if strings.Contains(parts[0], ";base64") {
+		return base64.StdEncoding.DecodeString(parts[1])
+	}
+	decoded, err := url.QueryUnescape(parts[1])
+	if err != nil {
+		return nil, err
+	}
+	return []byte(decoded), nil
+}
+
+func encodeRelPath(relPath string) string {
+	parts := strings.Split(filepath.ToSlash(relPath), "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
+}
+
+func listCacheFiles() []string {
+	files := []string{}
+	_ = filepath.WalkDir(cacheRoot, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(cacheRoot, path)
+		if relErr == nil {
+			files = append(files, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	return files
 }
 
 func copyRequestHeaders(dst, src http.Header) {
