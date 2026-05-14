@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && node scripts/copy-versioned-build.cjs",
+    "build": "vite build",
     "preview": "vite preview",
     "test:k87": "node scripts/k87_feature_tests.cjs",
     "test:storyboard-parser": "node scripts/storyboard_project_parser_regression.cjs",

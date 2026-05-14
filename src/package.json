@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && node -e \"require('fs').copyFileSync('dist/index.html', 'VodStudio-V' + require('./package.json').version + '.html')\"",
+    "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {

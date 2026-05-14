@@ -1,0 +1,85 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    name: Build single HTML and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build dist
+        run: npm run build
+
+      - name: Read package version
+        id: pkg
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SAFE_SHA=${GITHUB_SHA::7}
+          TAG="v${VERSION}-${SAFE_SHA}"
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          test -f dist/index.html
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp dist/index.html "release-assets/index.html"
+          shasum -a 256 release-assets/index.html > release-assets/SHA256SUMS.txt
+          ls -lh release-assets
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pkg.outputs.tag }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        shell: bash
+        run: |
+          NOTES="Automated release for commit ${GITHUB_SHA}.
+
+Assets:
+- index.html: built single-file HTML from dist/index.html
+- SHA256SUMS.txt: checksum file"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete-asset "$TAG" "VodStudio-V${VERSION}.html" -y >/dev/null 2>&1 || true
+            gh release upload "$TAG" \
+              release-assets/index.html \
+              release-assets/SHA256SUMS.txt \
+              --clobber
+          else
+            gh release create "$TAG" \
+              release-assets/index.html \
+              release-assets/SHA256SUMS.txt \
+              --target "$GITHUB_SHA" \
+              --title "Tapnow Studio ${VERSION} (${GITHUB_SHA::7})" \
+              --notes "$NOTES" \
+              --latest
+          fi
