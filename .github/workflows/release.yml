@@ -82,7 +82,7 @@ jobs:
               release-assets/index.html \
               release-assets/SHA256SUMS.txt \
               --target "$GITHUB_SHA" \
-              --title "Tapnow Studio ${VERSION} (${GITHUB_SHA::7})" \
+              --title "VodStudioStudio ${VERSION} (${GITHUB_SHA::7})" \
               --notes "$NOTES" \
               --latest
           fi
