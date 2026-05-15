@@ -2574,6 +2574,13 @@ const DEFAULT_STORYBOARD_NOVEL_PROMPT = `你是影视分镜策划师。请把用
 2) 每个镜头一条，避免空话；
 3) 输出格式必须是 JSON 数组: [{"prompt":"..."}, ...]
 只输出 JSON，不要其他内容。`;
+const DEFAULT_STORYBOARD_NOVEL_TABLE_PROMPT = `你是影视分镜导演和表格编剧。请根据用户提供的小说/剧情文本，按剧情顺序拆成可执行的分镜 Markdown 表格。
+要求：
+1) 只输出 Markdown 表格，不要解释、不要代码块；
+2) 表头必须使用：| 场次镜号 | 时长 | 景别 | 运镜 | 场景描述 | 人物动作 | 生图提示词 | 人物情绪 | 台词和旁白 | 参考画面 | 音频音效 | BGM段落 | 场景图 | 人物图 | 合成图 | 片段视频 |；
+3) 每一行对应一个镜头，场次镜号从 1 开始递增；
+4) 生图提示词要具体、可直接用于生图/生视频，包含主体、动作、场景、镜头语言、光线和氛围；
+5) 没有信息的列留空，不要编造无关设定。`;
 const DEFAULT_STORYBOARD_TABLE_SUMMARY_PROMPT = `你是影视分镜提示词整合专家。请基于用户提供的分镜表逐行生成可直接用于生图/生视频的镜头提示词。
 要求：
 1) 每一行输出一条提示词，必须保持与 scene_index 一一对应；
@@ -5651,13 +5658,16 @@ function TapnowApp() {
                     configs.push({
                         ...kept,
                         ...vm,
+                        disabled: false,
                         customParams: vodType && selection
                             ? buildVodCustomParamsWithSelection(vodType, selection.modelName, selection.modelVersion)
                             : vm.customParams,
                         id: vm.id,
                         modelName: vm.id,
                         displayName: vm.id,
-                        provider: TENCENT_VOD_PROVIDER_KEY
+                        provider: TENCENT_VOD_PROVIDER_KEY,
+                        apiType: 'tencent-vod',
+                        libraryId: null
                     });
                 });
 
@@ -5684,9 +5694,15 @@ function TapnowApp() {
                 const parsed = JSON.parse(saved);
                 // 直接使用用户保存的数据，不再自动补充默认Provider
                 // 如果用户删除了一个Provider，它就不会再出现
-                return Object.fromEntries(Object.entries(parsed)
-                    .filter(([key]) => !isRemovedProviderKey(key))
-                    .map(([key, config]) => [key, normalizeProviderConfig(key, config)]));
+                return {
+                    ...Object.fromEntries(Object.entries(parsed)
+                        .filter(([key]) => !isRemovedProviderKey(key))
+                        .map(([key, config]) => [key, normalizeProviderConfig(key, config)])),
+                    [TENCENT_VOD_PROVIDER_KEY]: normalizeProviderConfig(
+                        TENCENT_VOD_PROVIDER_KEY,
+                        parsed[TENCENT_VOD_PROVIDER_KEY] || DEFAULT_PROVIDERS[TENCENT_VOD_PROVIDER_KEY]
+                    )
+                };
             }
         } catch (e) {
             console.error('加载 providers 配置失败:', e);
@@ -5702,6 +5718,54 @@ function TapnowApp() {
             console.error('保存 providers 配置失败:', e);
         }
     }, [providers]);
+
+    useEffect(() => {
+        setProviders(prev => {
+            if (prev?.[TENCENT_VOD_PROVIDER_KEY]) return prev;
+            return {
+                ...prev,
+                [TENCENT_VOD_PROVIDER_KEY]: normalizeProviderConfig(
+                    TENCENT_VOD_PROVIDER_KEY,
+                    DEFAULT_PROVIDERS[TENCENT_VOD_PROVIDER_KEY]
+                )
+            };
+        });
+        setApiConfigs(prev => {
+            let changed = false;
+            let next = Array.isArray(prev) ? [...prev] : [];
+            const ensureVodModel = (vm, type) => {
+                const index = next.findIndex(c => c.id === vm.id);
+                const kept = index >= 0 ? next[index] : {};
+                const selection = getVodSelectionFromCustomParams(type, kept.customParams || vm.customParams);
+                const merged = {
+                    ...kept,
+                    ...vm,
+                    disabled: false,
+                    customParams: buildVodCustomParamsWithSelection(type, selection.modelName, selection.modelVersion),
+                    modelName: vm.id,
+                    displayName: vm.id,
+                    provider: TENCENT_VOD_PROVIDER_KEY,
+                    apiType: 'tencent-vod',
+                    libraryId: null,
+                    _uid: kept._uid || `uid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+                };
+                if (index >= 0) {
+                    const before = JSON.stringify(next[index]);
+                    const after = JSON.stringify(merged);
+                    if (before !== after) {
+                        next[index] = merged;
+                        changed = true;
+                    }
+                } else {
+                    next.push(merged);
+                    changed = true;
+                }
+            };
+            ensureVodModel({ id: VOD_IMAGE_MODEL_ID, provider: TENCENT_VOD_PROVIDER_KEY, type: 'Image', customParams: buildVodCustomParams('image') }, 'image');
+            ensureVodModel({ id: VOD_VIDEO_MODEL_ID, provider: TENCENT_VOD_PROVIDER_KEY, type: 'Video', durations: ['5s', '10s'], customParams: buildVodCustomParams('video') }, 'video');
+            return changed ? next : prev;
+        });
+    }, []);
 
     // V3.6.0: 辅助函数 - 获取模型的 key 和 url
     const getModelConfig = useCallback((modelId) => {
@@ -6610,6 +6674,9 @@ function TapnowApp() {
     const [createCharacterEndpoint, setCreateCharacterEndpoint] = useState('');
     const [createCharacterSubmitting, setCreateCharacterSubmitting] = useState(false);
     const [createCharacterVideoError, setCreateCharacterVideoError] = useState(null);
+    const [createCharacterName, setCreateCharacterName] = useState('');
+    const [createCharacterPrompt, setCreateCharacterPrompt] = useState('');
+    const [createCharacterImageModel, setCreateCharacterImageModel] = useState('');
     const [characterReferenceBarExpanded, setCharacterReferenceBarExpanded] = useState({});
     const [batchModalOpen, setBatchModalOpen] = useState(false);
     const [batchSelectedIds, setBatchSelectedIds] = useState(new Set());
@@ -9208,7 +9275,13 @@ function TapnowApp() {
                 resolvedLibrary ? resolvedLibrary.imageDispatchIntervalSec : config.imageDispatchIntervalSec,
                 DEFAULT_IMAGE_DISPATCH_INTERVAL_SECONDS
             ),
-            customParams: resolvedLibrary ? normalizeCustomParams(resolvedLibrary.customParams) : normalizeCustomParams(config.customParams),
+            customParams: config.provider === TENCENT_VOD_PROVIDER_KEY
+                ? normalizeCustomParams(
+                    (Array.isArray(config.customParams) && config.customParams.length > 0)
+                        ? config.customParams
+                        : buildVodCustomParams(config.id === VOD_VIDEO_MODEL_ID ? 'video' : 'image')
+                )
+                : (resolvedLibrary ? normalizeCustomParams(resolvedLibrary.customParams) : normalizeCustomParams(config.customParams)),
             asyncConfig: normalizeAsyncConfig(resolvedLibrary?.asyncConfig || config.asyncConfig),
             requestChain: normalizeRequestChain(resolvedLibrary?.requestChain || config.requestChain),
             transport: normalizeTransportMode(resolvedLibrary?.transport || config.transport),
@@ -11556,6 +11629,18 @@ function TapnowApp() {
         });
         return texts;
     }, [getConnectedNodeIOEnvelopes]);
+
+    const getConnectedNovelInputText = useCallback((targetNodeId) => {
+        const novelTexts = [];
+        connections.forEach((conn) => {
+            if (conn.to !== targetNodeId) return;
+            const sourceNode = nodesMap.get(conn.from);
+            if (sourceNode?.type !== 'novel-input') return;
+            const content = String(sourceNode.settings?.content || sourceNode.content || '').trim();
+            if (content && !novelTexts.includes(content)) novelTexts.push(content);
+        });
+        return novelTexts.join('\n\n').trim();
+    }, [connections, nodesMap]);
 
     // 获取连接到特定输入点的首张图片URL（统一走 NodeIOEnvelope）
     const getConnectedImageForInput = useCallback((targetNodeId, inputType) => {
@@ -14955,6 +15040,77 @@ function TapnowApp() {
         });
     };
 
+    const getCharacterImageUrl = useCallback((character) => {
+        return character?.localCacheUrl || character?.profile_picture_url || character?.imageUrl || character?.avatar || '';
+    }, []);
+
+    const getCharacterReferenceImages = useCallback((characterIds = []) => {
+        const ids = Array.isArray(characterIds) ? characterIds : [];
+        if (ids.length === 0) return [];
+        const selected = new Set(ids.map(String));
+        return characterLibrary
+            .filter((character) => selected.has(String(character.id)))
+            .map(getCharacterImageUrl)
+            .filter(Boolean);
+    }, [characterLibrary, getCharacterImageUrl]);
+
+    const makeCharacterUsername = useCallback((name) => {
+        const base = String(name || 'character').trim() || 'character';
+        const normalized = base
+            .replace(/\s+/g, '_')
+            .replace(/[^a-zA-Z0-9_\u4e00-\u9fa5-]/g, '')
+            .slice(0, 32);
+        return normalized || `character_${Date.now()}`;
+    }, []);
+
+    const resolveCharacterLibraryMeta = useCallback((sourceNodeId, promptText, options = {}) => {
+        const explicitEnabled = options.addToCharacterLibrary === true;
+        const sourceNode = sourceNodeId ? nodesMap.get(sourceNodeId) : null;
+        const descNode = sourceNode?.settings?.sourceId ? nodesMap.get(sourceNode.settings.sourceId) : null;
+        const shouldSave = explicitEnabled
+            || sourceNode?.settings?.addToCharacterLibrary === true
+            || sourceNode?.type === 'generate-character-image';
+        if (!shouldSave) return null;
+        const name = String(
+            options.characterLibraryName
+            || sourceNode?.settings?.characterName
+            || sourceNode?.settings?.name
+            || descNode?.settings?.characterName
+            || descNode?.settings?.name
+            || '未命名角色'
+        ).trim() || '未命名角色';
+        return {
+            id: options.characterLibraryId || `${sourceNodeId || 'manual'}-${Date.now()}`,
+            name,
+            username: makeCharacterUsername(name),
+            prompt: options.characterLibraryPrompt || promptText || sourceNode?.settings?.prompt || descNode?.settings?.prompt || '',
+            sourceNodeId: sourceNodeId || null
+        };
+    }, [nodesMap, makeCharacterUsername]);
+
+    const addGeneratedCharacterToLibrary = useCallback((meta, imageUrls = []) => {
+        if (!meta) return;
+        const urls = Array.isArray(imageUrls) ? imageUrls : [imageUrls];
+        const imageUrl = urls.find(Boolean);
+        if (!imageUrl) return;
+        const character = {
+            id: meta.id || `char-${Date.now()}`,
+            username: meta.username || makeCharacterUsername(meta.name),
+            name: meta.name || meta.username || '未命名角色',
+            profile_picture_url: imageUrl,
+            imageUrl,
+            prompt: meta.prompt || '',
+            source: 'image',
+            sourceNodeId: meta.sourceNodeId || null,
+            createdAt: Date.now()
+        };
+        setCharacterLibrary(prev => {
+            const exists = prev.some(item => item.id === character.id || getCharacterImageUrl(item) === imageUrl);
+            return exists ? prev : [...prev, character];
+        });
+        showToast(`已保存角色“${character.name}”到角色库`, 'success', 2200);
+    }, [getCharacterImageUrl, makeCharacterUsername, showToast]);
+
     // 异步图像生成任务轮询函数
     const pollImageTask = (taskId, taskIdForPoll, baseUrl, apiKey, w, h, sourceNodeId, attempt = 0, isBananaModel = false) => {
         // banana模型使用800秒超时（160次 * 5秒），其他模型使用25分钟（300次 * 5秒）
@@ -15303,6 +15459,10 @@ function TapnowApp() {
                                     updatePreviewFromTask(taskId, primaryUrl, 'image', nodeIdToUse, mergedImageUrls.length > 1 ? mergedImageUrls : null);
                                 });
 
+                                if (hItem.characterLibraryMeta && !hItem.characterLibrarySaved) {
+                                    addGeneratedCharacterToLibrary(hItem.characterLibraryMeta, mergedImageUrls);
+                                }
+
                                 return {
                                     ...hItem,
                                     status: batchState.status,
@@ -15314,6 +15474,7 @@ function TapnowApp() {
                                     errorMsg: null,
                                     sourceNodeId: savedSourceNodeId || hItem.sourceNodeId, // 确保sourceNodeId被保留
                                     output_images: mergedImageUrls,
+                                    characterLibrarySaved: hItem.characterLibraryMeta ? true : hItem.characterLibrarySaved,
                                     ...(mergedImageUrls.length > 1 ? { mjImages: mergedImageUrls, selectedMjImageIndex: 0 } : {})
                                 };
                             }
@@ -15748,6 +15909,10 @@ function TapnowApp() {
                                 }
                             }
 
+                            if (hItem.characterLibraryMeta && !hItem.characterLibrarySaved) {
+                                addGeneratedCharacterToLibrary(hItem.characterLibraryMeta, mergedImageUrls);
+                            }
+
                             const updatedItem = {
                                 ...hItem,
                                 status: batchState.status,
@@ -15757,6 +15922,7 @@ function TapnowApp() {
                                 height: h,
                                 durationMs,
                                 output_images: mergedImageUrls,
+                                characterLibrarySaved: hItem.characterLibraryMeta ? true : hItem.characterLibrarySaved,
                                 mjImages: mergedImageUrls.length > 1 ? mergedImageUrls : null,
                                 selectedMjImageIndex: 0
                             };
@@ -15979,6 +16145,10 @@ function TapnowApp() {
                             }
                         }
 
+                        if (hItem.characterLibraryMeta && !hItem.characterLibrarySaved) {
+                            addGeneratedCharacterToLibrary(hItem.characterLibraryMeta, mergedImageUrls);
+                        }
+
                         const updatedItem = {
                             ...hItem,
                             status: batchState.status,
@@ -15988,6 +16158,7 @@ function TapnowApp() {
                             height: h,
                             durationMs,
                             output_images: mergedImageUrls,
+                            characterLibrarySaved: hItem.characterLibraryMeta ? true : hItem.characterLibrarySaved,
                             selectedMjImageIndex: 0
                         };
 
@@ -16512,6 +16683,9 @@ function TapnowApp() {
         if (isVodModel(actualModelId)) {
             const vodTaskId = options._existingTaskId || `vod-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             const vodSourceNodeId = node?.id || nodeId || null;
+            const vodCharacterLibraryMeta = type === 'image'
+                ? resolveCharacterLibraryMeta(vodSourceNodeId, prompt, options)
+                : null;
             const vodProvider = normalizeProviderConfig(TENCENT_VOD_PROVIDER_KEY, providers[TENCENT_VOD_PROVIDER_KEY] || {});
             const vodUseProxy = true;
             const vodProxyBase = (localServerUrl || 'http://127.0.0.1:9527').trim().replace(/\/+$/, '');
@@ -16560,7 +16734,9 @@ function TapnowApp() {
                     durationMs: null,
                     ratio: aspectRatio || '',
                     hasInputImages: vodSourceImages.length > 0,
-                    customParams: customParamSelections || null
+                    customParams: customParamSelections || null,
+                    characterLibraryMeta: vodCharacterLibraryMeta,
+                    characterLibrarySaved: false
                 }, ...prev]);
                 setHistoryOpen(true);
             }
@@ -16595,16 +16771,21 @@ function TapnowApp() {
                     });
                     const primaryUrl = urls[0] || '';
                     const durationMs = Date.now() - vodStartTime;
-                    setHistory((prev) => prev.map((h) => h.id === vodTaskId
-                        ? {
+                    setHistory((prev) => prev.map((h) => {
+                        if (h.id !== vodTaskId) return h;
+                        if (type === 'image' && h.characterLibraryMeta && !h.characterLibrarySaved) {
+                            addGeneratedCharacterToLibrary(h.characterLibraryMeta, urls);
+                        }
+                        return {
                             ...h,
                             status: 'completed',
                             progress: 100,
                             url: primaryUrl,
                             output_images: type === 'image' ? urls : undefined,
-                            durationMs
-                        }
-                        : h));
+                            durationMs,
+                            characterLibrarySaved: type === 'image' && h.characterLibraryMeta ? true : h.characterLibrarySaved
+                        };
+                    }));
                     // 写回节点：只需清除 isGenerating 标记；实际结果由画布节点
                     // 自行通过 history.find(h => h.sourceNodeId === node.id && h.status === 'completed') 读取
                     if (vodSourceNodeId) {
@@ -16782,6 +16963,9 @@ function TapnowApp() {
 
         const now = Date.now();
         const actualSourceNodeId = node?.id || nodeId || null;
+        const characterLibraryMeta = type === 'image'
+            ? resolveCharacterLibraryMeta(actualSourceNodeId, prompt, options)
+            : null;
         const useProxy = !!credentials.useProxy;
         const shouldInsertHistoryItem = !options._isRetry && !options._skipHistoryInsert;
 
@@ -16806,6 +16990,8 @@ function TapnowApp() {
                 customParams: customParamSelections || null,
                 imageBatchMode: type === 'image' ? activeImageBatchMode : null,
                 requestedImageCount: type === 'image' ? effectiveImageConcurrency : 1,
+                characterLibraryMeta,
+                characterLibrarySaved: false,
                 throttleStats: type === 'image'
                     ? {
                         dispatchIntervalSec: requestedDispatchIntervalSec,
@@ -18314,6 +18500,9 @@ function TapnowApp() {
                             const batchState = consumeImageBatchSuccess(taskId, hItem, imageUrls);
                             const mergedImageUrls = batchState.urls.length > 0 ? batchState.urls : imageUrls;
                             const primaryUrl = mergedImageUrls[0];
+                            if (hItem.characterLibraryMeta && !hItem.characterLibrarySaved) {
+                                addGeneratedCharacterToLibrary(hItem.characterLibraryMeta, mergedImageUrls);
+                            }
                             const updatedItem = {
                                 ...hItem,
                                 status: batchState.status,
@@ -18323,6 +18512,7 @@ function TapnowApp() {
                                 height: h,
                                 durationMs,
                                 output_images: mergedImageUrls,
+                                characterLibrarySaved: hItem.characterLibraryMeta ? true : hItem.characterLibrarySaved,
                                 mjImages: mergedImageUrls.length > 1 ? mergedImageUrls : null,
                                 selectedMjImageIndex: 0
                             };
@@ -20991,7 +21181,7 @@ function TapnowApp() {
                                                     sceneName: '',
                                                     description: '',
                                                     prompt: '',
-                                                    mode: 'video',
+                                                    mode: type === 'character-description' ? 'image' : 'video',
                                                     style: 'none',
                                                     imageModel: resolveModelKey(lastUsedImageModel),
                                                     imageRatio: lastUsedRatio || '16:9',
@@ -21103,24 +21293,18 @@ function TapnowApp() {
         return text.includes('360度全方位展示身体') ? text : `${text}，然后缓慢转一圈360度全方位展示身体`;
     };
 
-    const generateCharacterPrompt = useCallback((character, mode = 'video') => {
+    const generateCharacterPrompt = useCallback((character) => {
         const name = character?.name || character?.characterName || '角色';
         const role = (character?.role || character?.identity || character?.profession || '').trim();
-        const description = (character?.description || character?.appearance || '').trim();
+        const visualPrompt = (character?.visual_prompt || character?.visualPrompt || character?.appearance_prompt || character?.appearancePrompt || '').trim();
+        const description = (visualPrompt || character?.appearance || character?.description || '').trim();
         const ageText = normalizeCharacterAge(character?.age);
         const genderText = character?.gender ? String(character.gender).trim() : '';
         const subjectText = `${ageText}${genderText}`.trim() || '角色';
-
         const detailText = [role, description].filter(Boolean).join('，');
         const detailPart = detailText ? `，${detailText}` : '';
-        const introRole = role || description ? `，${role || description}` : '';
 
-        const basePrompt = `动漫风格，全身视角，名叫${name}的${subjectText}站在白色背景前${detailPart}`;
-        const speechPrompt = `${basePrompt}，正在用中文普通话面向镜头做自我介绍，说着：我是${name}${introRole}`;
-        if (mode === 'video') {
-            return `${speechPrompt}，然后缓慢转一圈360度全方位展示身体`;
-        }
-        return basePrompt;
+        return `动漫风格，全身视角，角色设定图，名叫${name}的${subjectText}站在纯白色背景前${detailPart}，五官清晰，发型、服装、体型、气质和标志性配饰明确，单人，无其他角色，无场景背景，高一致性角色形象参考图`;
     }, []);
 
     const generateScenePrompt = useCallback((scene) => {
@@ -21225,8 +21409,7 @@ function TapnowApp() {
         if (!extractNode) return;
 
         const characters = Array.isArray(analysisResults?.characters) ? analysisResults.characters : [];
-        const scenes = Array.isArray(analysisResults?.scenes) ? analysisResults.scenes : [];
-        if (characters.length === 0 && scenes.length === 0) return;
+        if (characters.length === 0) return;
 
         saveToUndoStack();
 
@@ -21235,14 +21418,9 @@ function TapnowApp() {
         const rowGap = 450;
         const timestamp = Date.now();
 
-        const defaultVideoModel = resolveModelKey(lastUsedVideoModel)
-            || resolveModelKey(apiConfigs.find(c => c.type === 'Video' && (c.id === 'sora-2' || c.id === 'sora-2-pro'))?.id)
-            || resolveModelKey(apiConfigs.find(c => c.type === 'Video')?.id)
-            || '';
         const defaultImageModel = resolveModelKey(lastUsedImageModel) || resolveModelKey(apiConfigs.find(c => isImageModelType(c.type))?.id) || '';
         const defaultChatModel = resolveModelKey(lastUsedExtractModel) || resolveModelKey(apiConfigs.find(c => isChatModelType(c.type))?.id) || '';
         const defaultRatio = lastUsedRatio || '16:9';
-        const defaultVideoResolution = lastUsedVideoResolution || '720p';
         const defaultImageResolution = lastUsedImageResolution || '2K';
 
         const newNodes = [];
@@ -21251,9 +21429,8 @@ function TapnowApp() {
         if (characters.length > 0) {
             characters.forEach((character, idx) => {
                 const descId = `node - char-desc - ${timestamp} - ${idx}`;
-                const videoId = `node - char-video - ${timestamp} - ${idx}`;
-                const createId = `node - char-create - ${timestamp} - ${idx}`;
-                const prompt = generateCharacterPrompt(character, 'video');
+                const imageId = `node - char-image - ${timestamp} - ${idx}`;
+                const prompt = generateCharacterPrompt(character);
 
                 newNodes.push({
                     id: descId,
@@ -21268,9 +21445,9 @@ function TapnowApp() {
                         role: character?.role || '',
                         age: character?.age || '',
                         gender: character?.gender || '',
-                        description: character?.description || '',
+                        description: character?.visual_prompt || character?.visualPrompt || character?.appearance_prompt || character?.appearancePrompt || character?.description || character?.appearance || '',
                         prompt,
-                        mode: 'video',
+                        mode: 'image',
                         imageModel: defaultImageModel,
                         imageRatio: defaultRatio,
                         imageResolution: defaultImageResolution,
@@ -21280,115 +21457,28 @@ function TapnowApp() {
                 });
 
                 newNodes.push({
-                    id: videoId,
-                    type: 'generate-character-video',
+                    id: imageId,
+                    type: 'generate-character-image',
                     x: baseX + 420,
                     y: baseY + (idx * rowGap),
                     width: 400,
                     height: 450,
                     settings: {
-                        model: defaultVideoModel,
-                        duration: '15s',
+                        model: defaultImageModel,
                         ratio: defaultRatio,
-                        resolution: defaultVideoResolution,
-                        videoPrompt: prompt,
+                        resolution: defaultImageResolution,
+                        prompt,
                         referenceImages: [],
                         sourceType: 'character-description',
-                        sourceId: descId
-                    }
-                });
-
-                newNodes.push({
-                    id: createId,
-                    type: 'create-character',
-                    x: baseX + 840,
-                    y: baseY + (idx * rowGap),
-                    width: 350,
-                    height: 300,
-                    settings: {
-                        name: character?.name || '',
-                        startSecond: 1,
-                        endSecond: 3
+                        sourceId: descId,
+                        characterName: character?.name || '',
+                        addToCharacterLibrary: true
                     }
                 });
 
                 newConnections.push(
                     { id: `conn - char-desc - ${timestamp} - ${idx}`, from: extractNodeId, to: descId },
-                    { id: `conn - char-video - ${timestamp} - ${idx}`, from: descId, to: videoId },
-                    { id: `conn - char-create - ${timestamp} - ${idx}`, from: videoId, to: createId }
-                );
-            });
-        }
-
-        if (scenes.length > 0) {
-            const characterCount = characters.length;
-            scenes.forEach((scene, idx) => {
-                const sceneIndex = characterCount + idx;
-                const descId = `node - scene-desc - ${timestamp} - ${idx}`;
-                const videoId = `node - scene-video - ${timestamp} - ${idx}`;
-                const createId = `node - scene-create - ${timestamp} - ${idx}`;
-                const prompt = generateScenePrompt(scene);
-                const sceneName = scene?.location || scene?.name || scene?.sceneName || '';
-
-                newNodes.push({
-                    id: descId,
-                    type: 'scene-description',
-                    x: baseX,
-                    y: baseY + (sceneIndex * rowGap),
-                    width: 400,
-                    height: 400,
-                    settings: {
-                        sceneId: scene?.id || '',
-                        sceneName,
-                        description: scene?.description || '',
-                        prompt,
-                        mode: 'video',
-                        style: scene?.style || '',
-                        imageModel: defaultImageModel,
-                        imageRatio: defaultRatio,
-                        imageResolution: defaultImageResolution,
-                        referenceImages: [],
-                        chatModel: defaultChatModel
-                    }
-                });
-
-                newNodes.push({
-                    id: videoId,
-                    type: 'generate-scene-video',
-                    x: baseX + 420,
-                    y: baseY + (sceneIndex * rowGap),
-                    width: 400,
-                    height: 450,
-                    settings: {
-                        model: defaultVideoModel,
-                        duration: '15s',
-                        ratio: defaultRatio,
-                        resolution: defaultVideoResolution,
-                        videoPrompt: prompt,
-                        referenceImages: [],
-                        sourceType: 'scene-description',
-                        sourceId: descId
-                    }
-                });
-
-                newNodes.push({
-                    id: createId,
-                    type: 'create-scene',
-                    x: baseX + 840,
-                    y: baseY + (sceneIndex * rowGap),
-                    width: 350,
-                    height: 300,
-                    settings: {
-                        name: sceneName,
-                        startSecond: 1,
-                        endSecond: 3
-                    }
-                });
-
-                newConnections.push(
-                    { id: `conn - scene-desc - ${timestamp} - ${idx}`, from: extractNodeId, to: descId },
-                    { id: `conn - scene-video - ${timestamp} - ${idx}`, from: descId, to: videoId },
-                    { id: `conn - scene-create - ${timestamp} - ${idx}`, from: videoId, to: createId }
+                    { id: `conn - char-image - ${timestamp} - ${idx}`, from: descId, to: imageId }
                 );
             });
         }
@@ -21399,7 +21489,7 @@ function TapnowApp() {
         if (newConnections.length > 0) {
             setConnections(prev => [...prev, ...newConnections]);
         }
-    }, [nodesMap, apiConfigs, lastUsedVideoModel, lastUsedImageModel, lastUsedExtractModel, lastUsedRatio, lastUsedVideoResolution, lastUsedImageResolution, generateCharacterPrompt, generateScenePrompt]);
+    }, [nodesMap, apiConfigs, lastUsedImageModel, lastUsedExtractModel, lastUsedRatio, lastUsedImageResolution, generateCharacterPrompt]);
 
     const ensureImageNodeForDescription = (descNodeId) => {
         const descNode = nodesMap.get(descNodeId);
@@ -21709,11 +21799,36 @@ function TapnowApp() {
         updateNodeSettings(nodeId, { llmWorkspaceHeight: nextHeight });
     }, [nodesMap, updateNodeSettings]);
 
+    const resolveStoryboardChatCredentials = useCallback((nodeId) => {
+        const candidates = [chatModel, lastUsedExtractModel, lastUsedAnalyzeModel]
+            .map((id) => resolveModelKey(id || ''))
+            .filter(Boolean);
+        apiConfigs
+            .filter((config) => isChatModelType(config.type))
+            .forEach((config) => {
+                const key = resolveModelKey(config._uid || config.id || '');
+                if (key) candidates.push(key);
+            });
+        const uniqueCandidates = [...new Set(candidates)];
+        for (const modelId of uniqueCandidates) {
+            const credentials = getApiCredentials(modelId);
+            if (credentials?.key) {
+                if (modelId !== chatModel) setChatModel(modelId);
+                return { modelId, credentials };
+            }
+        }
+        updateNodeSettings(nodeId, { errorMsg: '请先在设置中配置一个可用的大模型 Key' });
+        showToast('请先在设置中配置一个可用的大模型 Key', 'warning', 3200);
+        setSettingsOpen(true);
+        return null;
+    }, [apiConfigs, chatModel, getApiCredentials, lastUsedAnalyzeModel, lastUsedExtractModel, setChatModel, setSettingsOpen, showToast, updateNodeSettings]);
+
     const runStoryboardLlmSplit = async (nodeId, mode = 'script') => {
         const node = nodesMap.get(nodeId);
         if (!node || node.type !== 'storyboard-node') return;
         const normalizedMode = STORYBOARD_LLM_SPLIT_MODES.includes(mode) ? mode : 'script';
-        let scriptText = node.settings?.scriptText || '';
+        const connectedNovelText = normalizedMode === 'novel' ? getConnectedNovelInputText(nodeId) : '';
+        let scriptText = connectedNovelText || node.settings?.scriptText || '';
         if (!scriptText.trim()) {
             const connectedTexts = getConnectedTextNodes(nodeId);
             if (connectedTexts.length > 0) {
@@ -21721,7 +21836,9 @@ function TapnowApp() {
             }
         }
         if (!scriptText.trim()) {
-            updateNodeSettings(nodeId, { errorMsg: '请先输入分镜脚本' });
+            const message = normalizedMode === 'novel' ? '请先把“小说输入”节点连接到智能分镜' : '请先输入分镜脚本';
+            updateNodeSettings(nodeId, { errorMsg: message });
+            showToast(message, 'warning', 2800);
             return;
         }
 
@@ -21732,11 +21849,9 @@ function TapnowApp() {
             shouldAppend = !overwrite;
         }
 
-        const { key: apiKey, url: baseUrl } = getApiCredentials(chatModel);
-        if (!apiKey) {
-            updateNodeSettings(nodeId, { errorMsg: '请配置 Chat 模型 Key' });
-            return;
-        }
+        const resolvedChat = resolveStoryboardChatCredentials(nodeId);
+        if (!resolvedChat) return;
+        const { modelId: storyboardChatModel, credentials: { key: apiKey, url: baseUrl, modelName } } = resolvedChat;
 
         try {
             saveToUndoStack();
@@ -21746,7 +21861,7 @@ function TapnowApp() {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    model: chatModel,
+                    model: modelName || storyboardChatModel,
                     messages: [
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: scriptText }
@@ -21754,8 +21869,11 @@ function TapnowApp() {
                     stream: false
                 })
             });
-            const data = await response.json();
-            const content = data.choices?.[0]?.message?.content || '';
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data?.error?.message || data?.message || `请求失败 (${response.status})`);
+            }
+            const content = data.choices?.[0]?.message?.content || data.content || '';
             const parsedShots = parseJsonArrayFromText(content);
             if (!Array.isArray(parsedShots) || parsedShots.length === 0) {
                 throw new Error('AI 未返回可用镜头');
@@ -21910,11 +22028,9 @@ function TapnowApp() {
             return;
         }
 
-        const { key: apiKey, url: baseUrl } = getApiCredentials(chatModel);
-        if (!apiKey) {
-            updateNodeSettings(nodeId, { errorMsg: '请配置 Chat 模型 Key' });
-            return;
-        }
+        const resolvedChat = resolveStoryboardChatCredentials(nodeId);
+        if (!resolvedChat) return;
+        const { modelId: storyboardChatModel, credentials: { key: apiKey, url: baseUrl, modelName } } = resolvedChat;
 
         const tableRowsForPrompt = normalizedTable.rows.map((row, rowIdx) => {
             const rowPayload = { scene_index: rowIdx + 1 };
@@ -21941,7 +22057,7 @@ function TapnowApp() {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    model: chatModel,
+                    model: modelName || storyboardChatModel,
                     messages: [
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: userPrompt }
@@ -21989,7 +22105,7 @@ function TapnowApp() {
             updateNodeSettings(nodeId, { isGenerating: false, errorMsg: message });
             showToast(message, 'error', 2800);
         }
-    }, [buildStoryboardTableSyncPatch, chatModel, getApiCredentials, getStoryboardPromptTemplate, nodesMap, normalizeStoryboardTableData, saveToUndoStack, showToast, updateNodeSettings]);
+    }, [buildStoryboardTableSyncPatch, getStoryboardPromptTemplate, nodesMap, normalizeStoryboardTableData, resolveStoryboardChatCredentials, saveToUndoStack, showToast, updateNodeSettings]);
     const importStoryboardMarkdownTable = useCallback((nodeId, markdownText, options = {}) => {
         const node = nodesMap.get(nodeId);
         if (!node || node.type !== 'storyboard-node') return false;
@@ -22018,6 +22134,67 @@ function TapnowApp() {
         showToast(`${formatLabel} 表格导入成功：${parsedTable.rows.length} 行`, 'success', 2400);
         return true;
     }, [buildStoryboardTableSyncPatch, nodesMap, showToast, updateNodeSettings]);
+
+    const runStoryboardNovelTableGenerate = useCallback(async (nodeId) => {
+        const node = nodesMap.get(nodeId);
+        if (!node || node.type !== 'storyboard-node') return;
+        const novelText = getConnectedNovelInputText(nodeId);
+        if (!novelText) {
+            showToast('请先把“小说输入”节点连接到智能分镜', 'warning', 2800);
+            return;
+        }
+        const existingRows = Array.isArray(node.settings?.tableData?.rows) ? node.settings.tableData.rows.length : 0;
+        const existingShots = Array.isArray(node.settings?.shots) ? node.settings.shots.length : 0;
+        if ((existingRows > 0 || existingShots > 0) && !window.confirm('当前智能分镜已有内容，是否用小说重新生成并覆盖？')) {
+            return;
+        }
+        const resolvedChat = resolveStoryboardChatCredentials(nodeId);
+        if (!resolvedChat) return;
+        const { modelId: storyboardChatModel, credentials: { key: apiKey, url: baseUrl, modelName } } = resolvedChat;
+        try {
+            saveToUndoStack();
+            updateNodeSettings(nodeId, {
+                isGenerating: true,
+                errorMsg: '',
+                llmPromptMode: 'novel',
+                scriptText: novelText,
+                viewMode: 'table'
+            });
+            const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: modelName || storyboardChatModel,
+                    messages: [
+                        { role: 'system', content: DEFAULT_STORYBOARD_NOVEL_TABLE_PROMPT },
+                        { role: 'user', content: novelText.substring(0, 30000) }
+                    ],
+                    stream: false
+                })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data?.error?.message || data?.message || `请求失败 (${response.status})`);
+            }
+            const content = String(data.choices?.[0]?.message?.content || data.content || '').replace(/```(?:markdown|md)?/gi, '').replace(/```/g, '').trim();
+            if (!content) throw new Error('AI 未返回可用 Markdown 表格');
+            const imported = importStoryboardMarkdownTable(nodeId, content, { switchToTable: true });
+            if (!imported) throw new Error('AI 返回内容不是有效 Markdown 表格');
+            updateNodeSettings(nodeId, {
+                isGenerating: false,
+                errorMsg: '',
+                tableMarkdownCollapsed: false,
+                scriptText: novelText,
+                llmPromptMode: 'novel'
+            });
+            showToast('已根据小说生成 Markdown 分镜表', 'success', 2600);
+        } catch (err) {
+            console.error('[NovelToStoryboardTable] Error:', err);
+            const message = err?.message || '小说分镜表生成失败';
+            updateNodeSettings(nodeId, { isGenerating: false, errorMsg: message });
+            showToast(message, 'error', 3200);
+        }
+    }, [getConnectedNovelInputText, importStoryboardMarkdownTable, nodesMap, resolveStoryboardChatCredentials, saveToUndoStack, showToast, updateNodeSettings]);
     const pasteStoryboardTableFromClipboard = useCallback(async (nodeId) => {
         const node = nodesMap.get(nodeId);
         if (!node || node.type !== 'storyboard-node') return;
@@ -23350,15 +23527,21 @@ function TapnowApp() {
         }, 500);
 
         // 4. 构建提示词
-        const prompt = `请分析以下小说内容，提取出所有主要角色和关键场景。
+        const prompt = `请分析以下小说内容，提取出所有主要角色和关键场景。角色部分必须重点提炼可用于“角色生图”的外观形象刻画，而不是剧情总结。
 
 小说内容：
 ${inputText.substring(0, 15000)} ... (截断)
 
+角色提取要求：
+- 每个主要角色都要给出稳定、可复用的视觉设定。
+- visual_prompt 必须描述：年龄感、性别气质、脸型五官、发型发色、体型身姿、服装材质/颜色、标志性配饰、整体气质。
+- 不要把具体剧情动作、对白、临时场景写入 visual_prompt。
+- visual_prompt 应适合直接生成单人角色设定图。
+
 请按以下 JSON 格式返回：
 {
     "characters": [
-        { "name": "角色名", "role": "身份/职业/设定", "age": "年龄段或岁数", "gender": "性别", "description": "角色外貌和性格描述", "appearance": "外貌特征关键词" }
+        { "name": "角色名", "role": "身份/职业/设定", "age": "年龄段或岁数", "gender": "性别", "description": "角色简要设定", "appearance": "外貌关键词", "visual_prompt": "可直接用于角色生图的人物外观形象刻画" }
     ],
     "scenes": [
         { "location": "场景名", "description": "环境描述", "mood": "氛围关键词", "style": "风格关键词" }
@@ -23368,22 +23551,34 @@ ${inputText.substring(0, 15000)} ... (截断)
 
         try {
             const baseUrl = (credentials.url || DEFAULT_BASE_URL).replace(/\/+$/, '');
-
-            const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+            const endpoint = `${baseUrl}/v1/chat/completions`;
+            const requestBody = JSON.stringify({
+                model: credentials.modelName || config.modelName || config.id || 'gemini-1.5-pro-latest',
+                messages: [
+                    { role: 'system', content: 'You are a helpful assistant that analyzes novels.' },
+                    { role: 'user', content: prompt }
+                ],
+                temperature: 0.7
+            });
+            const requestOptions = {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${apiKey}`,
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({
-                    model: config.modelName || config.id || 'gemini-1.5-pro-latest',
-                    messages: [
-                        { role: 'system', content: 'You are a helpful assistant that analyzes novels.' },
-                        { role: 'user', content: prompt }
-                    ],
-                    temperature: 0.7
-                })
-            });
+                body: requestBody
+            };
+            const primaryEndpoint = credentials.useProxy && credentials.provider
+                ? buildProxyUrl(endpoint, credentials.provider)
+                : endpoint;
+            let response;
+            try {
+                response = await fetch(primaryEndpoint, requestOptions);
+            } catch (fetchError) {
+                const proxyBase = (localServerUrl || '').trim().replace(/\/+$/, '');
+                if (!proxyBase || primaryEndpoint.startsWith(proxyBase)) throw fetchError;
+                response = await fetch(`${proxyBase}/proxy?url=${encodeURIComponent(endpoint)}`, requestOptions);
+            }
 
             if (!response.ok) {
                 let detail = '';
@@ -23430,8 +23625,8 @@ ${inputText.substring(0, 15000)} ... (截断)
         } catch (error) {
             console.error('Extraction Failed', error);
             let msg = error?.message || '提取失败';
-            if (error?.name === 'TypeError' || /Failed to fetch|NetworkError/i.test(msg)) {
-                msg = '网络或跨域请求失败（CORS）。请检查 API 地址、协议（http/https）或开启浏览器 CORS 插件。';
+            if (error?.name === 'TypeError' || /Failed to fetch|NetworkError|CORS/i.test(msg)) {
+                msg = '网络或跨域请求失败（CORS）。已尝试使用代理转发；请检查代理地址是否可用，以及该模型 Provider 是否开启“本地代理”。';
             }
             updateNodeSettings(nodeId, { errorMsg: msg });
             showToast(`提取失败: ${msg}`, 'error', 5000);
@@ -23477,7 +23672,7 @@ ${inputText.substring(0, 15000)} ... (截断)
             || ''
         );
         if (!modelId) {
-            showToast('请在“提取角色和场景”节点选择分析模型', 'warning', 4000);
+            showToast('请在“角色提取”节点选择分析模型', 'warning', 4000);
             setActiveDropdown({ nodeId: targetId, type: 'extract-model' });
             return;
         }
@@ -26841,7 +27036,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 node.type === 'text-node' ? '文字' :
                                                     node.type === 'preview' ? '预览' :
                                                         node.type === 'novel-input' ? '小说输入' :
-                                                            node.type === 'extract-characters-scenes' ? '提取角色和场景' :
+                                                            node.type === 'extract-characters-scenes' ? '提取角色' :
                                                                 node.type === 'character-description' ? '角色描述' :
                                                                     node.type === 'scene-description' ? '场景描述' :
                                                                         node.type === 'generate-character-video' ? '生成角色视频' :
@@ -27216,7 +27411,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     onMouseDown={(e) => e.stopPropagation()}
                                     onClick={(e) => { e.stopPropagation(); handleNovelExtract(node.id); }}
                                 >
-                                    <Sparkles size={12} /> {t('提取角色和场景')}
+                                    <Sparkles size={12} /> {t('提取角色')}
                                 </button>
                             </div>
                         </div>
@@ -27226,11 +27421,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                             <div className="flex items-center justify-between px-3 py-2 border-b shrink-0">
                                 <div className="flex items-center gap-1.5 text-xs font-semibold">
                                     <Users size={12} className="text-purple-500" />
-                                    <span>{t('角色与场景提取')}</span>
+                                    <span>{t('角色提取')}</span>
                                 </div>
                                 {node.settings?.analysisResults && (
                                     <span className="text-[10px] opacity-70">
-                                        {(node.settings.analysisResults.characters?.length || 0) + (node.settings.analysisResults.scenes?.length || 0)}
+                                        {node.settings.analysisResults.characters?.length || 0}
                                     </span>
                                 )}
                             </div>
@@ -27436,42 +27631,44 @@ ${inputText.substring(0, 15000)} ... (截断)
 
                                         <div className="flex-1 flex flex-col gap-3 p-3 overflow-y-auto custom-scrollbar min-h-0">
                                             <div className="flex items-center gap-2 shrink-0">
-                                                <button
-                                                    className={`px-2 py-1 rounded text-[10px] transition-colors ${mode === 'video'
-                                                        ? 'bg-blue-500 text-white'
-                                                        : theme === 'dark'
-                                                            ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-                                                            : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
-                                                        }`}
-                                                    onMouseDown={(e) => e.stopPropagation()}
-                                                    onClick={() => {
-                                                        const currentPrompt = node.settings?.prompt || (isCharacter ? generateCharacterPrompt(baseCharacter, 'image') : defaultPrompt);
-                                                        const updatedPrompt = isCharacter ? ensureCharacterVideoSuffix(currentPrompt) : currentPrompt;
-                                                        updateNodeSettings(node.id, { mode: 'video', prompt: updatedPrompt });
-                                                        setTimeout(() => ensureVideoNodeForDescription(node.id), 0);
-                                                    }}
-                                                >
-                                                    视频模式
-                                                </button>
-                                                <button
-                                                    className={`px-2 py-1 rounded text-[10px] transition-colors ${mode === 'image'
-                                                        ? 'bg-blue-500 text-white'
-                                                        : theme === 'dark'
-                                                            ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-                                                            : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
-                                                        }`}
-                                                    onMouseDown={(e) => e.stopPropagation()}
-                                                    onClick={() => {
-                                                        const currentPrompt = node.settings?.prompt || (isCharacter ? generateCharacterPrompt(baseCharacter, 'video') : defaultPrompt);
-                                                        const updatedPrompt = isCharacter
-                                                            ? stripCharacterVideoSuffix(currentPrompt)
-                                                            : currentPrompt;
-                                                        updateNodeSettings(node.id, { mode: 'image', prompt: updatedPrompt });
-                                                        setTimeout(() => ensureImageNodeForDescription(node.id), 0);
-                                                    }}
-                                                >
-                                                    图片模式
-                                                </button>
+                                                {isCharacter ? (
+                                                    <span className="px-2 py-1 rounded text-[10px] bg-blue-500 text-white">生图模式</span>
+                                                ) : (
+                                                    <>
+                                                        <button
+                                                            className={`px-2 py-1 rounded text-[10px] transition-colors ${mode === 'video'
+                                                                ? 'bg-blue-500 text-white'
+                                                                : theme === 'dark'
+                                                                    ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                                                                    : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+                                                                }`}
+                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                            onClick={() => {
+                                                                const currentPrompt = node.settings?.prompt || defaultPrompt;
+                                                                updateNodeSettings(node.id, { mode: 'video', prompt: currentPrompt });
+                                                                setTimeout(() => ensureVideoNodeForDescription(node.id), 0);
+                                                            }}
+                                                        >
+                                                            视频模式
+                                                        </button>
+                                                        <button
+                                                            className={`px-2 py-1 rounded text-[10px] transition-colors ${mode === 'image'
+                                                                ? 'bg-blue-500 text-white'
+                                                                : theme === 'dark'
+                                                                    ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                                                                    : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+                                                                }`}
+                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                            onClick={() => {
+                                                                const currentPrompt = node.settings?.prompt || defaultPrompt;
+                                                                updateNodeSettings(node.id, { mode: 'image', prompt: currentPrompt });
+                                                                setTimeout(() => ensureImageNodeForDescription(node.id), 0);
+                                                            }}
+                                                        >
+                                                            图片模式
+                                                        </button>
+                                                    </>
+                                                )}
                                                 <div className="ml-auto flex items-center gap-2">
                                                     <button
                                                         onClick={() => runDescriptionPromptAction(node.id, 'enhance')}
@@ -29866,6 +30063,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                         const previewPanelWidth = 220;
                         const nodeQueueItems = batchQueueItems.filter(item => item.nodeId === node.id);
                         const nodeRunningItems = batchRunningItems.filter(item => item.nodeId === node.id);
+                        const connectedNovelText = getConnectedNovelInputText(node.id);
+                        const hasConnectedNovel = !!connectedNovelText;
                         const storyboardMode = normalizeStoryboardMode(node.settings?.mode);
                         const storyboardViewMode = normalizeStoryboardViewMode(node.settings?.viewMode);
                         const storyboardSegmentTrackClass = theme === 'dark'
@@ -30151,6 +30350,36 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 <FileText size={12} />
                                                 <span className="whitespace-nowrap">{t('脚本')}</span>
                                             </button>
+                                            {hasConnectedNovel && (
+                                                <>
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            runStoryboardLlmSplit(node.id, 'novel');
+                                                        }}
+                                                        className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${storyboardPrimaryButtonClass}`}
+                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                        disabled={!!node.settings?.isGenerating}
+                                                        title={t('根据已连接小说生成卡片分镜')}
+                                                    >
+                                                        <Sparkles size={12} />
+                                                        <span className="whitespace-nowrap">{node.settings?.isGenerating && node.settings?.llmPromptMode === 'novel' ? t('生成中...') : t('小说转卡片')}</span>
+                                                    </button>
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            runStoryboardNovelTableGenerate(node.id);
+                                                        }}
+                                                        className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${storyboardPrimaryButtonClass}`}
+                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                        disabled={!!node.settings?.isGenerating}
+                                                        title={t('根据已连接小说生成 Markdown 分镜表')}
+                                                    >
+                                                        <Sparkles size={12} />
+                                                        <span className="whitespace-nowrap">{node.settings?.isGenerating && storyboardViewMode === 'table' ? t('生成中...') : t('小说转表格')}</span>
+                                                    </button>
+                                                </>
+                                            )}
                                             {/* V3.5.18: 导入关键帧按钮 */}
                                             {(() => {
                                                 const connectedVideoNode = getConnectedVideoInputNode(node.id);
@@ -33176,6 +33405,39 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             </div>
                                         </div>
                                     )}
+                                    {characterLibrary.length > 0 && (node.type === 'gen-image' || node.type === 'gen-video') && (() => {
+                                        const selectedIds = Array.isArray(node.settings?.selectedCharacterIds) ? node.settings.selectedCharacterIds : [];
+                                        return (
+                                            <div className={`mb-2 rounded-lg border p-2 ${theme === 'dark' ? 'bg-zinc-900/50 border-blue-500/20' : 'bg-blue-50 border-blue-200'}`} onMouseDown={(e) => e.stopPropagation()}>
+                                                <div className={`text-[10px] font-medium mb-1.5 ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>角色参考</div>
+                                                <div className="flex gap-2 overflow-x-auto custom-scrollbar pb-1">
+                                                    {characterLibrary.map((character) => {
+                                                        const isSelected = selectedIds.includes(character.id);
+                                                        const imageUrl = getCharacterImageUrl(character);
+                                                        return (
+                                                            <button
+                                                                key={character.id}
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    const nextIds = isSelected
+                                                                        ? selectedIds.filter(id => id !== character.id)
+                                                                        : [...selectedIds, character.id];
+                                                                    updateNodeSettings(node.id, { selectedCharacterIds: nextIds });
+                                                                }}
+                                                                className={`relative shrink-0 rounded-lg border p-1 transition-all ${isSelected ? 'border-blue-500 ring-2 ring-blue-500/40' : theme === 'dark' ? 'border-zinc-700 opacity-75 hover:opacity-100' : 'border-zinc-200 opacity-75 hover:opacity-100'}`}
+                                                                title={character.name || character.username}
+                                                            >
+                                                                <div className="w-10 h-10 rounded overflow-hidden bg-zinc-800">
+                                                                    {imageUrl ? <LazyBase64Image src={imageUrl} className="w-full h-full object-cover" /> : <User size={18} className="m-2 text-zinc-500" />}
+                                                                </div>
+                                                                <div className="mt-1 w-10 truncate text-[9px]">{character.name || character.username}</div>
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
                                     <div
                                         className={`rounded-lg p-3 mb-2 border focus-within:border-blue-500/30 transition-colors flex-1 flex flex-col ${theme === 'dark'
                                             ? 'bg-zinc-950/50 border-zinc-800'
@@ -34129,7 +34391,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             const basePrompt = node.type === 'gen-image' ? node.settings?.prompt || '' : node.settings?.videoPrompt || '';
                                             const connectedTexts = getConnectedTextNodes(node.id);
                                             const finalPrompt = connectedTexts.length > 0 ? connectedTexts.join(' ') + (basePrompt ? ' ' + basePrompt : '') : basePrompt;
-                                            startGeneration(finalPrompt, node.type === 'gen-image' ? 'image' : 'video', connectedImages, node.id, {
+                                            const characterReferenceImages = getCharacterReferenceImages(node.settings?.selectedCharacterIds || []);
+                                            const sourceImages = [...characterReferenceImages, ...connectedImages];
+                                            startGeneration(finalPrompt, node.type === 'gen-image' ? 'image' : 'video', sourceImages, node.id, {
                                                 customParams: node.settings?.customParams,
                                                 imageConcurrency: normalizeImageConcurrency(
                                                     node.settings?.imageConcurrency
@@ -34149,7 +34413,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                 </div>
             </div >
         );
-    }, [selectedNodeId, selectedNodeIds, hoverTargetId, nodeConnectedStatus, adjacentNodesCache, apiConfigsMap, getConnectedInputImages, theme, view, dragNodeId, connectingSource, connectingTarget, connectingInputType, deleteNode, handleNodeMouseUp, screenToWorld, setDragNodeId, setSelectedNodeId, setSelectedNodeIds, setActiveDropdown, setHoverTargetId, setConnectingSource, setConnectingTarget, setConnectingInputType, setResizingNodeId, setLightboxItem, isVideoUrl, updateNodeSettings, getConnectedTextNodes, startGeneration, getDefaultDurationForModel, getDefaultDurationsForModel, getConnectedGenNodes, getConnectedVideoInputNode, getConnectedVideoAnalyzeNode, handleCanvasDragOver, handleGenNodeDrop, importStoryboardMarkdownTable, importStoryboardTableFromFile, mutateStoryboardTable, normalizeStoryboardTableData, openStoryboardTableCellEditor, runStoryboardTablePromptMerge, markInteraction, resolveNodeRenderZIndex, touchNodeSelectionPriority]);
+    }, [selectedNodeId, selectedNodeIds, hoverTargetId, nodeConnectedStatus, adjacentNodesCache, apiConfigsMap, getConnectedInputImages, theme, view, dragNodeId, connectingSource, connectingTarget, connectingInputType, deleteNode, handleNodeMouseUp, screenToWorld, setDragNodeId, setSelectedNodeId, setSelectedNodeIds, setActiveDropdown, setHoverTargetId, setConnectingSource, setConnectingTarget, setConnectingInputType, setResizingNodeId, setLightboxItem, isVideoUrl, updateNodeSettings, getConnectedTextNodes, getConnectedNovelInputText, startGeneration, getDefaultDurationForModel, getDefaultDurationsForModel, getConnectedGenNodes, getConnectedVideoInputNode, getConnectedVideoAnalyzeNode, handleCanvasDragOver, handleGenNodeDrop, importStoryboardMarkdownTable, importStoryboardTableFromFile, mutateStoryboardTable, normalizeStoryboardTableData, openStoryboardTableCellEditor, runStoryboardLlmSplit, runStoryboardNovelTableGenerate, runStoryboardTablePromptMerge, markInteraction, resolveNodeRenderZIndex, touchNodeSelectionPriority]);
 
     // 高性能模式：当节点数量超过 50 或手动开启时启用
     const isPerfMode = nodes.length > 50 || globalPerformanceMode !== 'off';
@@ -35308,20 +35572,15 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     className={`font-bold text-xs ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'
                                         }`}
                                 >
-                                    {t('Sora 角色库')}
+                                    {t('角色库')}
                                 </h3>
                                 <div className="flex items-center gap-2">
                                     <button
                                         onClick={() => {
-                                            // 自动计算默认 endpoint
-                                            const soraConfig = apiConfigs.find(c => c.type === 'Video' && (c.id === 'sora-2' || c.id === 'sora-2-pro'));
-                                            if (soraConfig) {
-                                                const baseUrl = (soraConfig.url || DEFAULT_BASE_URL).replace(/\/+$/, '');
-                                                setCreateCharacterEndpoint(`${baseUrl}/sora/v1/characters`);
-                                            } else {
-                                                const baseUrl = DEFAULT_BASE_URL.replace(/\/+$/, '');
-                                                setCreateCharacterEndpoint(`${baseUrl}/sora/v1/characters`);
-                                            }
+                                            const defaultImageModel = resolveModelKey(lastUsedImageModel || apiConfigs.find(c => isImageModelType(c.type))?.id || '');
+                                            setCreateCharacterImageModel(defaultImageModel);
+                                            setCreateCharacterName('');
+                                            setCreateCharacterPrompt('');
                                             setCreateCharacterOpen(true);
                                         }}
                                         className={`px-2 py-1 text-[10px] rounded transition-colors ${theme === 'dark'
@@ -35378,7 +35637,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 <div className="aspect-square bg-zinc-800 relative group/char">
                                                     {(character.localCacheUrl || character.profile_picture_url) ? (
                                                         <LazyBase64Image
-                                                            src={character.localCacheUrl || character.profile_picture_url}
+                                                            src={getCharacterImageUrl(character)}
                                                             alt={character.username}
                                                             className="w-full h-full object-cover"
                                                             onError={(e) => {
@@ -35413,11 +35672,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 <div className="p-2 relative">
                                                     <p className={`text-xs truncate flex items-center gap-1 ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'
                                                         }`}>
-                                                        {character.username}
+                                                        {character.name || character.username}
                                                         <LinkIcon
                                                             size={12}
                                                             className="text-green-500 shrink-0"
-                                                            title={t('Sora 2 已同步')}
+                                                            title={t('可作为参考图复用')}
                                                         />
                                                     </p>
                                                 </div>
@@ -35452,6 +35711,35 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     </button>
                                 </div>
                                 <div className="p-4 space-y-4">
+                                    <div>
+                                        <label className={`block text-xs mb-2 ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>角色名称</label>
+                                        <input
+                                            type="text"
+                                            value={createCharacterName}
+                                            onChange={(e) => setCreateCharacterName(e.target.value)}
+                                            placeholder={t('输入角色名称...')}
+                                            className={`w-full px-3 py-2 text-xs rounded border outline-none ${theme === 'dark'
+                                                ? 'bg-zinc-900 border-zinc-700 text-zinc-200 placeholder-zinc-600'
+                                                : theme === 'solarized' ? 'bg-[#fdf6e3] border-[#eee8d5] text-zinc-800 placeholder-zinc-400' : 'bg-white border-zinc-300 text-zinc-800 placeholder-zinc-400'
+                                                }`}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className={`block text-xs mb-2 ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>角色外观提示词</label>
+                                        <textarea
+                                            value={createCharacterPrompt}
+                                            onChange={(e) => setCreateCharacterPrompt(e.target.value)}
+                                            placeholder={t('描述角色的五官、发型、服装、体型、气质、标志性配饰等...')}
+                                            className={`w-full h-28 px-3 py-2 text-xs rounded border outline-none resize-none ${theme === 'dark'
+                                                ? 'bg-zinc-900 border-zinc-700 text-zinc-200 placeholder-zinc-600'
+                                                : theme === 'solarized' ? 'bg-[#fdf6e3] border-[#eee8d5] text-zinc-800 placeholder-zinc-400' : 'bg-white border-zinc-300 text-zinc-800 placeholder-zinc-400'
+                                                }`}
+                                        />
+                                        <p className={`text-[10px] mt-1 ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                            将使用当前默认生图模型创建角色图，完成后自动保存到角色库。
+                                        </p>
+                                    </div>
+                                    {false && (<>
                                     {/* 视频源选择 */}
                                     <div>
                                         <label className={`block text-xs mb-2 ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'
@@ -35649,6 +35937,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         </p>
                                     </div>
 
+                                    </>)}
+
                                     {/* 提交按钮 */}
                                     <div className="flex justify-end gap-2 pt-2">
                                         <button
@@ -35662,28 +35952,36 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         </button>
                                         <button
                                             onClick={async () => {
-                                                if (createCharacterVideoSourceType === 'url' && !createCharacterVideoUrl.trim()) {
-                                                    alert(t('请输入视频 URL'));
+                                                const name = createCharacterName.trim();
+                                                const promptText = createCharacterPrompt.trim();
+                                                if (!name) {
+                                                    alert(t('请输入角色名称'));
                                                     return;
                                                 }
-                                                if (createCharacterVideoSourceType === 'history' && !createCharacterSelectedTaskId) {
-                                                    alert(t('请选择历史记录中的视频'));
+                                                if (!promptText) {
+                                                    alert(t('请输入角色外观提示词'));
                                                     return;
                                                 }
-                                                if (createCharacterEndSecond - createCharacterStartSecond < 1 || createCharacterEndSecond - createCharacterStartSecond > 3) {
-                                                    alert(t('时间范围必须在 1-3 秒之间'));
+                                                const modelId = resolveModelKey(createCharacterImageModel || lastUsedImageModel || apiConfigs.find(c => isImageModelType(c.type))?.id || '');
+                                                if (!modelId) {
+                                                    alert(t('请先配置或选择生图模型'));
+                                                    setSettingsOpen(true);
                                                     return;
                                                 }
                                                 setCreateCharacterSubmitting(true);
                                                 try {
-                                                    // 优先使用用户手动输入的 API 地址，如果为空则使用默认地址
-                                                    const endpointToUse = createCharacterEndpoint.trim() || null;
-
-                                                    if (createCharacterVideoSourceType === 'url') {
-                                                        await createCharacter(createCharacterVideoUrl, createCharacterStartSecond, createCharacterEndSecond, null, endpointToUse);
-                                                    } else {
-                                                        await createCharacter('', createCharacterStartSecond, createCharacterEndSecond, createCharacterSelectedTaskId, endpointToUse);
-                                                    }
+                                                    const finalPrompt = generateCharacterPrompt({ name, description: promptText });
+                                                    await startGeneration(finalPrompt, 'image', [], `character-library-${Date.now()}`, {
+                                                        model: modelId,
+                                                        ratio: '1:1',
+                                                        resolution: lastUsedImageResolution || '2K',
+                                                        addToCharacterLibrary: true,
+                                                        characterLibraryName: name,
+                                                        characterLibraryPrompt: finalPrompt
+                                                    });
+                                                    setCreateCharacterOpen(false);
+                                                    setCreateCharacterName('');
+                                                    setCreateCharacterPrompt('');
                                                 } finally {
                                                     setCreateCharacterSubmitting(false);
                                                 }
@@ -35696,7 +35994,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     : 'bg-blue-500 text-white hover:bg-blue-600'
                                                 }`}
                                         >
-                                            {createCharacterSubmitting ? '创建中...' : '创建角色'}
+                                            {createCharacterSubmitting ? '生成中...' : '生成角色图'}
                                         </button>
                                     </div>
                                 </div>
@@ -36281,15 +36579,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         { type: 'novel-input', label: t('小说输入') },
                                         {
                                             type: 'extract-characters-scenes',
-                                            label: t('提取角色和场景'),
+                                            label: t('提取角色'),
                                             children: [
                                                 { type: 'character-description', label: t('角色描述') },
                                                 { type: 'scene-description', label: t('场景描述') },
                                                 { type: 'generate-character-image', label: t('生成角色图片') },
                                                 { type: 'generate-scene-image', label: t('生成场景图片') },
-                                                { type: 'generate-character-video', label: t('生成角色视频') },
                                                 { type: 'generate-scene-video', label: t('生成场景视频') },
-                                                { type: 'create-character', label: t('创建角色') },
                                                 { type: 'create-scene', label: t('创建场景') }
                                             ]
                                         },
