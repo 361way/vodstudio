@@ -1,0 +1,22 @@
+{
+  "envId": "test234-d0g5z9qyae01763f6",
+  "functions": [
+    {
+      "name": "vodstudio-proxy",
+      "timeout": 30,
+      "runtime": "Nodejs16.13",
+      "memorySize": 256,
+      "installDependency": true,
+      "handler": "index.main",
+      "envVariables": {
+        "ENV_ID": "test234-d0g5z9qyae01763f6"
+      },
+      "triggers": [
+        {
+          "name": "vodstudio-proxy-http",
+          "type": "http"
+        }
+      ]
+    }
+  ]
+}

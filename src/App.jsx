@@ -5884,7 +5884,7 @@ function TapnowApp() {
 
     // V2.6.1 Feature: 本地服务器 URL
     const [localServerUrl, setLocalServerUrl] = useState(() => {
-        return localStorage.getItem('tapnow_local_server_url') || 'http://127.0.0.1:9527';
+        return localStorage.getItem('tapnow_local_server_url') || 'https://test234-d0g5z9qyae01763f6-1305660054.ap-shanghai.app.tcloudbase.com';
     });
 
     // V2.6.1 Feature: 本地缓存服务器状态

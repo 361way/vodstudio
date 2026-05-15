@@ -1,6 +1,7 @@
 # Dependencies
 node_modules/
 training/
+vodstudio-cache/
 
 # Sensitive SSH/private key files
 id_rsa*
@@ -15,6 +16,7 @@ id_rsa*
 *.local
 *.secret
 *.secrets
+
 
 # Local saved runtime configs / exported browser configs
 localStorage*.json
