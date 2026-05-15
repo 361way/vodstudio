@@ -2,6 +2,9 @@
 
 这是一个探索 **"AI 结对编程"** 极限的产物——展示了如何仅通过自然语言交互，在一个**单文件 (Single HTML)** 中构建出包含节点编辑器、多模态 API 调用、视频分析算法等复杂功能的现代化应用。Fork 自 Tapnow-Studio-PP 项目，增加了腾讯云VOD和Tokenhub调用逻辑，用于运行测试。除了本地部署外，也增加了cloudbase云端部署方式。
 
+- 使用VOD时因为CORS跨域问题，必须要启用本地代理，可以直接 `go run proxy-server.go` 启动本地代理。虽然这里也有一个nodejs版本的代理，但不推荐用，因为nodejs版本的代理导致全局代理，有时会造成本地主机上网异常。后面会去修复这个问题，当前测试golang版本没这个问题；
+- 本地生文大模型不需要代理也可以直接运行。Base URL 直接使用 TokenHub地址就可以了：https://tokenhub.tencentmaas.com ，后面/v1/api/xxx这些不需要加。
+
 
 ## 🌟 核心工作内容 (Highlights)
 相比于原始项目，我们在以下方面进行了重大改进：

@@ -2558,6 +2558,13 @@ const normalizeJimengVideoDuration = (value, allowed = []) => {
 };
 const isImageModelType = (type) => type === 'Image' || type === 'ChatImage';
 const isChatModelType = (type) => type === 'Chat' || type === 'ChatImage';
+const isChatPanelSelectableModel = (model) => {
+    if (!model) return false;
+    return isChatModelType(model.type)
+        || model.provider === TENCENT_VOD_PROVIDER_KEY
+        || model.id === VOD_IMAGE_MODEL_ID
+        || model.id === VOD_VIDEO_MODEL_ID;
+};
 const MAX_CUSTOM_PARAMS = 30;
 const DEFAULT_IMAGE_DISPATCH_INTERVAL_SECONDS = 2;
 const INTERNAL_CUSTOM_PARAM_NAMES = new Set([
@@ -6469,6 +6476,7 @@ function TapnowApp() {
     });
     const [chatModelDropdownOpen, setChatModelDropdownOpen] = useState(false);
     const [chatHoveredProvider, setChatHoveredProvider] = useState(null);
+    const [chatCustomParams, setChatCustomParams] = useState({});
     const [isChatSending, setIsChatSending] = useState(false);
 
     // V3.7.24: 保存聊天模型选择到 localStorage
@@ -6656,6 +6664,8 @@ function TapnowApp() {
     const [historyFocusIndex, setHistoryFocusIndex] = useState(-1); // V3.7.28: 历史列表键盘导航
     const [historyFocusId, setHistoryFocusId] = useState(null);
     const [charactersOpen, setCharactersOpen] = useState(false);
+    const [storyboardAssetsOpen, setStoryboardAssetsOpen] = useState(false);
+    const [storyboardAssetTab, setStoryboardAssetTab] = useState('image');
     const [characterLibrary, setCharacterLibrary] = useState(() => {
         try {
             const saved = localStorage.getItem('tapnow_characters');
@@ -8709,6 +8719,38 @@ function TapnowApp() {
         const previousItems = history.filter(item => (item.startTime || 0) < sessionStartTime);
         return [...sessionItems, ...previousItems];
     }, [history, sessionStartTime]);
+
+    const storyboardAssetItems = useMemo(() => {
+        const assets = [];
+        historyDisplayItems.forEach((item) => {
+            if (!item || !isCompletedLikeStatus(item.status)) return;
+            const storyboardInfo = parseStoryboardSourceNodeId(item.sourceNodeId);
+            if (!storyboardInfo) return;
+            const base = {
+                id: item.id,
+                item,
+                storyboardInfo,
+                prompt: item.prompt || '',
+                time: item.time || '',
+                startTime: item.startTime || 0
+            };
+            if (item.type === 'video') {
+                const url = item.url || item.originalUrl || item.mjOriginalUrl || '';
+                if (url) assets.push({ ...base, id: `${item.id}-video`, type: 'video', url });
+                return;
+            }
+            const imageUrls = Array.isArray(item.output_images) && item.output_images.length > 0
+                ? item.output_images
+                : (Array.isArray(item.mjImages) && item.mjImages.length > 0 ? item.mjImages : [item.url || item.originalUrl || item.mjOriginalUrl].filter(Boolean));
+            imageUrls.forEach((url, index) => {
+                if (url) assets.push({ ...base, id: `${item.id}-image-${index}`, type: 'image', url, imageIndex: index });
+            });
+        });
+        return assets;
+    }, [historyDisplayItems]);
+
+    const storyboardImageAssets = useMemo(() => storyboardAssetItems.filter(item => item.type === 'image'), [storyboardAssetItems]);
+    const storyboardVideoAssets = useMemo(() => storyboardAssetItems.filter(item => item.type === 'video'), [storyboardAssetItems]);
     const isHistoryItemNavigable = useCallback((item) => {
         if (!item) return false;
         const status = item?.status;
@@ -12802,6 +12844,54 @@ function TapnowApp() {
         }));
         setChatInput('');
         setChatFiles([]);
+
+        const actualChatModelId = config?.id || resolveModelKey(chatModel);
+        if (isVodModel(actualChatModelId)) {
+            try {
+                const vodType = actualChatModelId === VOD_VIDEO_MODEL_ID ? 'video' : 'image';
+                const sourceImages = newUserMsg.files
+                    .filter((file) => file.isImage || file.isVideo)
+                    .map((file) => file.content)
+                    .filter(Boolean);
+                const fallbackPrompt = sourceImages.length > 0
+                    ? (vodType === 'video' ? '根据参考图生成视频' : '根据参考图生成图片')
+                    : '';
+                const generationPrompt = (newUserMsg.content || fallbackPrompt).trim();
+                parseVodCredentials(normalizeProviderConfig(TENCENT_VOD_PROVIDER_KEY, providers[TENCENT_VOD_PROVIDER_KEY] || {}));
+                await startGeneration(generationPrompt, vodType, sourceImages, null, {
+                    model: chatModel,
+                    customParams: chatCustomParams,
+                    ratio: 'Auto',
+                    duration: '5s'
+                });
+                const assistantMsg = {
+                    id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                    role: 'assistant',
+                    content: vodType === 'video'
+                        ? '已提交腾讯云 VOD 生视频任务，结果会出现在左侧历史记录。'
+                        : '已提交腾讯云 VOD 生图任务，结果会出现在左侧历史记录。',
+                    timestamp: Date.now(),
+                    modelId: chatModel
+                };
+                setChatSessions(prev => prev.map(s => s.id === chatIdToUse ? { ...s, messages: [...s.messages, assistantMsg] } : s));
+            } catch (error) {
+                const errorMsg = error?.message || 'VOD 任务提交失败';
+                setChatSessions(prev => prev.map(s => s.id === chatIdToUse ? {
+                    ...s,
+                    messages: [...s.messages, {
+                        id: `err-${Date.now()}`,
+                        role: 'assistant',
+                        content: errorMsg,
+                        timestamp: Date.now(),
+                        isError: true,
+                        modelId: chatModel
+                    }]
+                } : s));
+            } finally {
+                setIsChatSending(false);
+            }
+            return;
+        }
 
         // 构建带上下文的对话历史，帮助模型回顾上下文
         // 使用当前会话的消息加上新消息
@@ -34688,13 +34778,14 @@ ${inputText.substring(0, 15000)} ... (截断)
                         >
                             <Layout size={18} />
                         </button>
-                        {[{ id: 'select', icon: MousePointer2 }, { id: 'history', icon: History }, { id: 'characters', icon: Users }].map((tool) => (
+                        {[{ id: 'select', icon: MousePointer2, title: t('选择') }, { id: 'history', icon: History, title: t('生成历史') }, { id: 'characters', icon: Users, title: t('角色库') }, { id: 'storyboard-assets', icon: LayoutGrid, title: t('分镜') }].map((tool) => (
                             <button
                                 key={tool.id}
                                 onClick={() => {
                                     setActiveTool(tool.id);
                                     if (tool.id === 'history') setHistoryOpen(!historyOpen);
                                     if (tool.id === 'characters') setCharactersOpen(!charactersOpen);
+                                    if (tool.id === 'storyboard-assets') setStoryboardAssetsOpen(!storyboardAssetsOpen);
                                 }}
                                 className={`p-2.5 rounded-lg transition-all ${activeTool === tool.id
                                     ? theme === 'dark'
@@ -34706,6 +34797,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         ? 'text-zinc-500 hover:text-zinc-300'
                                         : 'text-zinc-500 hover:text-zinc-800'
                                     }`}
+                            title={tool.title}
                             >
                                 <tool.icon size={18} />
                             </button>
@@ -35554,6 +35646,119 @@ ${inputText.substring(0, 15000)} ... (截断)
                         </div>
                     )}
 
+                    {/* Storyboard Assets Panel */}
+                    {storyboardAssetsOpen && (
+                        <div
+                            className={`w-72 z-30 flex flex-col animate-in slide-in-from-left border-r transition-colors duration-300 ${theme === 'dark'
+                                ? 'bg-[#121214] border-zinc-800'
+                                : theme === 'solarized'
+                                    ? 'bg-[#eee8d5] border-[#d7cfb2]'
+                                    : 'bg-zinc-50 border-zinc-200'
+                                }`}
+                        >
+                            <div className={`p-3 border-b ${theme === 'dark' ? 'border-zinc-800' : 'border-zinc-200'}`}>
+                                <div className="flex justify-between items-center mb-3">
+                                    <h3 className={`font-bold text-xs ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>
+                                        {t('分镜')}
+                                    </h3>
+                                    <button onClick={() => setStoryboardAssetsOpen(false)}>
+                                        <X size={12} className={theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'} />
+                                    </button>
+                                </div>
+                                <div className={`grid grid-cols-2 gap-1 rounded-lg p-1 ${theme === 'dark' ? 'bg-zinc-900' : 'bg-zinc-100'}`}>
+                                    {[
+                                        { key: 'image', label: t('图片'), count: storyboardImageAssets.length },
+                                        { key: 'video', label: t('视频'), count: storyboardVideoAssets.length }
+                                    ].map((tab) => (
+                                        <button
+                                            key={tab.key}
+                                            onClick={() => setStoryboardAssetTab(tab.key)}
+                                            className={`px-2 py-1.5 rounded-md text-[11px] font-medium transition-colors ${storyboardAssetTab === tab.key
+                                                ? theme === 'dark'
+                                                    ? 'bg-blue-600 text-white'
+                                                    : 'bg-white text-blue-600 shadow-sm'
+                                                : theme === 'dark'
+                                                    ? 'text-zinc-400 hover:text-zinc-200'
+                                                    : 'text-zinc-500 hover:text-zinc-800'
+                                                }`}
+                                        >
+                                            {tab.label} ({tab.count})
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                            <div className="flex-1 overflow-y-auto custom-scrollbar p-3">
+                                {(() => {
+                                    const assets = storyboardAssetTab === 'video' ? storyboardVideoAssets : storyboardImageAssets;
+                                    if (assets.length === 0) {
+                                        return (
+                                            <div className={`text-center py-8 text-sm ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                                {storyboardAssetTab === 'video' ? t('暂无分镜视频') : t('暂无分镜图片')}
+                                            </div>
+                                        );
+                                    }
+                                    return (
+                                        <div className="grid grid-cols-2 gap-3">
+                                            {assets.map((asset) => {
+                                                const displayUrl = resolveHistoryUrl(asset.item, asset.url);
+                                                const shotLabel = asset.storyboardInfo?.shotId ? `Shot ${asset.storyboardInfo.shotId}` : 'Shot';
+                                                return (
+                                                    <div
+                                                        key={asset.id}
+                                                        className={`group rounded-lg overflow-hidden border cursor-pointer hover:border-blue-500/50 transition-colors ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800' : 'bg-white border-zinc-200'}`}
+                                                        onClick={() => {
+                                                            if (!displayUrl) return;
+                                                            const lightboxImages = asset.type === 'image'
+                                                                ? (Array.isArray(asset.item.output_images) && asset.item.output_images.length > 0
+                                                                    ? asset.item.output_images
+                                                                    : (Array.isArray(asset.item.mjImages) && asset.item.mjImages.length > 0 ? asset.item.mjImages : null))
+                                                                : null;
+                                                            setLightboxItem({
+                                                                ...asset.item,
+                                                                type: asset.type,
+                                                                url: displayUrl,
+                                                                mjImages: lightboxImages,
+                                                                selectedMjImageIndex: asset.imageIndex || 0,
+                                                                storyboardContext: asset.storyboardInfo
+                                                            });
+                                                        }}
+                                                        onContextMenu={(e) => handleHistoryRightClick(e, asset.item, asset.url, asset.imageIndex ?? null)}
+                                                    >
+                                                        <div className="aspect-square bg-zinc-900 relative">
+                                                            {asset.type === 'video' ? (
+                                                                <video src={displayUrl} className="w-full h-full object-cover bg-black" muted playsInline />
+                                                            ) : (
+                                                                <LazyBase64Image src={displayUrl} className="w-full h-full object-cover" alt={asset.prompt || shotLabel} />
+                                                            )}
+                                                            <div className="absolute left-1 top-1 px-1.5 py-0.5 rounded bg-black/60 text-white text-[9px]">
+                                                                {shotLabel}
+                                                            </div>
+                                                            {asset.type === 'video' && (
+                                                                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                                                                    <div className="w-8 h-8 rounded-full bg-black/55 flex items-center justify-center text-white">
+                                                                        <Play size={14} fill="currentColor" />
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        <div className="p-2">
+                                                            <div className={`text-[10px] truncate ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`} title={asset.prompt}>
+                                                                {asset.prompt || shotLabel}
+                                                            </div>
+                                                            <div className={`text-[9px] mt-0.5 ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                                                {asset.time || (asset.type === 'video' ? t('视频') : t('图片'))}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    );
+                                })()}
+                            </div>
+                        </div>
+                    )}
+
                     {/* Characters Panel */}
                     {charactersOpen && (
                         <div
@@ -36173,7 +36378,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 {/* Provider 列表 */}
                                                 <div className={`w-24 border-r pr-1 max-h-64 overflow-y-auto custom-scrollbar flex flex-col ${theme === 'dark' ? 'border-zinc-700' : 'border-zinc-200'}`}>
                                                     {Object.entries(groupedApiConfigs)
-                                                        .filter(([, group]) => group.models.some(m => isChatModelType(m.type)))
+                                                        .filter(([, group]) => group.models.some(isChatPanelSelectableModel))
                                                         .map(([providerKey, group]) => (
                                                             <button
                                                                 key={providerKey}
@@ -36189,7 +36394,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 {/* Model 列表 */}
                                                 <div className="flex-1 pl-1 max-h-64 overflow-y-auto custom-scrollbar">
                                                     {chatHoveredProvider && groupedApiConfigs[chatHoveredProvider]?.models
-                                                        .filter(m => isChatModelType(m.type))
+                                                        .filter(isChatPanelSelectableModel)
                                                         .map((m) => {
                                                             const modelKey = m._uid || m.id;
                                                             const currentModelKey = resolveModelKey(chatModel);
@@ -36198,6 +36403,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     key={modelKey}
                                                                     onClick={() => {
                                                                         setChatModel(modelKey);
+                                                                        setChatCustomParams({});
                                                                         setChatModelDropdownOpen(false);
                                                                         setChatHoveredProvider(null);
                                                                     }}
@@ -36429,6 +36635,17 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         : 'border-zinc-200 bg-zinc-50'
                                     }`}
                             >
+                                {(() => {
+                                    const selectedChatConfig = getApiConfigByKey(chatModel);
+                                    if (selectedChatConfig?.provider !== TENCENT_VOD_PROVIDER_KEY) return null;
+                                    const panel = renderCustomParamInputs(chatModel, chatCustomParams, setChatCustomParams, 'chat');
+                                    if (!panel) return null;
+                                    return (
+                                        <div className={`mb-2 rounded-lg border p-2 ${theme === 'dark' ? 'bg-cyan-950/20 border-cyan-900/50' : 'bg-cyan-50 border-cyan-200'}`}>
+                                            {panel}
+                                        </div>
+                                    );
+                                })()}
                                 {chatFiles.length > 0 && (
                                     <div className="flex gap-2 overflow-x-auto pb-2 mb-2 custom-scrollbar">
                                         {chatFiles.map((f, i) => (
