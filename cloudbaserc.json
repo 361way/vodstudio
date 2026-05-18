@@ -10,13 +10,7 @@
       "handler": "index.main",
       "envVariables": {
         "ENV_ID": "test234-d0g5z9qyae01763f6"
-      },
-      "triggers": [
-        {
-          "name": "vodstudio-proxy-http",
-          "type": "http"
-        }
-      ]
+      }
     }
   ]
 }

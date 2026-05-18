@@ -211,6 +211,23 @@ Golang代理主要解决VOD服务安全问题，DeepSeek 能直连，是因为�
 
 <br>
 
+## CloudBase 部署信息
+
+- 环境 ID：`test234-d0g5z9qyae01763f6`（地域：`ap-shanghai`）
+- 静态托管地址：`https://test234-d0g5z9qyae01763f6-1305660054.tcloudbaseapp.com/`
+- 当前验证访问地址：`https://test234-d0g5z9qyae01763f6-1305660054.tcloudbaseapp.com/?v=20260518-1133`
+- 云函数：`vodstudio-proxy`，事件函数形态，通过 Web SDK `callFunction` 调用，不依赖 HTTP 触发器。
+- 云函数用途：为腾讯云 VOD API 与 COS PUT 上传提供云端转发，解决浏览器 CORS 限制。
+- 云函数安全规则：允许前端调用；函数内部已限制转发目标，仅允许 `vod.tencentcloudapi.com` 和腾讯云 COS 域名，避免开放代理风险。
+- 前端 CloudBase SDK：使用环境 Publishable Key 初始化，避免未登录状态下 `Cannot read properties of null (reading 'scope')`。
+- 部署命令：
+
+```bash
+npm run build
+tcb fn deploy vodstudio-proxy -e test234-d0g5z9qyae01763f6 --force
+tcb hosting deploy dist/ -e test234-d0g5z9qyae01763f6 --yes
+```
+
 ## ⚠️ 免责声明 (Disclaimer)
 
 <br>

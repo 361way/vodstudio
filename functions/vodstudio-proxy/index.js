@@ -6,6 +6,7 @@ exports.main = async (event, context) => {
     const headers = event.headers || {};
     const query = event.queryString || {};
     const body = event.body || '';
+    const isBodyBase64 = !!event.isBase64Encoded;
 
     // CORS headers
     const corsHeaders = {
@@ -63,6 +64,15 @@ exports.main = async (event, context) => {
             return await handleListFiles(corsHeaders);
         }
 
+        // /cos-put - 代理 COS PUT Object 请求（解决浏览器 CORS 问题）
+        if (pathname === '/cos-put') {
+            const targetUrl = query.url || '';
+            if (!targetUrl) {
+                return jsonResp(400, corsHeaders, { error: 'Missing url parameter' });
+            }
+            return await handleCosPut(targetUrl, method, headers, body, corsHeaders, isBodyBase64);
+        }
+
         return jsonResp(404, corsHeaders, { error: 'Not found', path: pathname });
     } catch (err) {
         return jsonResp(500, corsHeaders, { error: 'Internal error', detail: err?.message || String(err) });
@@ -84,6 +94,9 @@ async function handleProxy(target, method, headers, body, corsHeaders) {
         targetUrl = new URL(target);
     } catch {
         return jsonResp(400, corsHeaders, { error: 'Invalid target URL' });
+    }
+    if (targetUrl.protocol !== 'https:' || targetUrl.hostname !== 'vod.tencentcloudapi.com') {
+        return jsonResp(403, corsHeaders, { error: 'Forbidden target URL' });
     }
 
     const options = {
@@ -215,6 +228,54 @@ async function walkDir(dir, root, files) {
             files.push(rel.replace(/\\/g, '/'));
         }
     }
+}
+
+async function handleCosPut(targetUrl, method, headers, body, corsHeaders, isBodyBase64 = false) {
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(targetUrl);
+    } catch {
+        return jsonResp(400, corsHeaders, { error: 'Invalid COS URL' });
+    }
+    if (method !== 'PUT') {
+        return jsonResp(405, corsHeaders, { error: 'Method not allowed' });
+    }
+    if (parsedUrl.protocol !== 'https:' || !/^.+\.cos\.[a-z0-9-]+\.myqcloud\.com$/i.test(parsedUrl.hostname)) {
+        return jsonResp(403, corsHeaders, { error: 'Forbidden COS URL' });
+    }
+    
+    const options = {
+        method: 'PUT',
+        headers: { ...headers }
+    };
+    delete options.headers.host;
+    delete options.headers['content-length'];
+    
+    const httpModule = parsedUrl.protocol === 'https:' ? require('https') : require('http');
+    
+    return new Promise((resolve) => {
+        const proxyReq = httpModule.request(parsedUrl, options, (proxyRes) => {
+            let data = Buffer.alloc(0);
+            proxyRes.on('data', (chunk) => { data = Buffer.concat([data, chunk]); });
+            proxyRes.on('end', () => {
+                resolve({
+                    statusCode: proxyRes.statusCode,
+                    headers: { ...corsHeaders, ...proxyRes.headers, 'Content-Length': data.length },
+                    body: data.toString('base64'),
+                    isBase64Encoded: true
+                });
+            });
+        });
+        
+        proxyReq.on('error', (err) => {
+            resolve(jsonResp(502, corsHeaders, { error: 'COS upload failed', detail: err?.message || String(err) }));
+        });
+        
+        if (body) {
+            proxyReq.write(Buffer.from(body, isBodyBase64 ? 'base64' : 'utf8'));
+        }
+        proxyReq.end();
+    });
 }
 
 function sanitizeSegment(value, fallback = 'item') {

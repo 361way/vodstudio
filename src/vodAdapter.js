@@ -218,6 +218,17 @@ function wrapProxy(targetUrl, { useProxy, localServerUrl }) {
     return `${base}/proxy?url=${encodeURIComponent(targetUrl)}`;
 }
 
+function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        const chunk = bytes.subarray(i, i + chunkSize);
+        binary += String.fromCharCode.apply(null, chunk);
+    }
+    return btoa(binary);
+}
+
 // ============================================================================
 // 调用 VOD API
 // ============================================================================
@@ -230,7 +241,7 @@ function wrapProxy(targetUrl, { useProxy, localServerUrl }) {
  * @returns {Promise<Object>} 解析后的 Response 对象
  */
 async function callVodApi(action, body, ctx) {
-    const { credentials, useProxy, localServerUrl } = ctx;
+    const { credentials, useProxy, localServerUrl, tcb } = ctx;
     const { secretId, secretKey, region } = credentials;
     const payload = JSON.stringify(body || {});
 
@@ -250,25 +261,56 @@ async function callVodApi(action, body, ctx) {
     delete fetchHeaders.Host;
 
     const directUrl = `https://${VOD_API_HOST}`;
-    const finalUrl = wrapProxy(directUrl, { useProxy, localServerUrl });
-
     let resp;
-    try {
-        resp = await fetch(finalUrl, {
-            method: 'POST',
-            headers: fetchHeaders,
-            body: payload
-        });
-    } catch (err) {
-        if (!useProxy && localServerUrl) {
-            const proxyUrl = wrapProxy(directUrl, { useProxy: true, localServerUrl });
-            resp = await fetch(proxyUrl, {
+
+    // 如果提供了 tcb 实例，则通过云函数代理调用
+    if (tcb) {
+        try {
+            const proxyResult = await tcb.callFunction({
+                name: 'vodstudio-proxy',
+                data: {
+                    httpMethod: 'POST',
+                    path: '/proxy',
+                    queryString: { url: directUrl },
+                    headers: fetchHeaders,
+                    body: payload
+                }
+            });
+            
+            const { statusCode, headers: respHeaders, body: respBody, isBase64Encoded } = proxyResult.result || {};
+            const bodyText = isBase64Encoded ? atob(respBody) : (respBody || '');
+            
+            // 创建类似 fetch Response 的对象
+            resp = {
+                ok: statusCode >= 200 && statusCode < 300,
+                status: statusCode || 500,
+                headers: new Headers(respHeaders || {}),
+                text: async () => bodyText,
+                json: async () => { try { return JSON.parse(bodyText); } catch (e) { return {}; } }
+            };
+        } catch (err) {
+            throw new Error(`[VOD/${action}] 云函数调用失败: ${err?.message || err}`);
+        }
+    } else {
+        // 原有逻辑：通过 fetch 调用（本地代理或直接）
+        const finalUrl = wrapProxy(directUrl, { useProxy, localServerUrl });
+        try {
+            resp = await fetch(finalUrl, {
                 method: 'POST',
                 headers: fetchHeaders,
                 body: payload
             });
-        } else {
-            throw new Error(`[VOD/${action}] 网络请求失败，可能是浏览器 CORS 限制。请确认 CORS 转发服务可用: ${err?.message || err}`);
+        } catch (err) {
+            if (!useProxy && localServerUrl) {
+                const proxyUrl = wrapProxy(directUrl, { useProxy: true, localServerUrl });
+                resp = await fetch(proxyUrl, {
+                    method: 'POST',
+                    headers: fetchHeaders,
+                    body: payload
+                });
+            } else {
+                throw new Error(`[VOD/${action}] 网络请求失败，可能是浏览器 CORS 限制。请确认 CORS 转发服务可用: ${err?.message || err}`);
+            }
         }
     }
 
@@ -362,35 +404,70 @@ async function putObjectToCos({ tempCred, bucket, region, key, blob }, ctx = {})
 
     // URL 里的 key 需要按路径片段 encode（保留 /）
     const encodedKey = uriPathname.split('/').map((seg) => seg ? encodeURIComponent(seg) : '').join('/');
-    const url = `https://${host}${encodedKey}`;
-    const finalUrl = wrapProxy(url, ctx);
-
     let resp;
-    try {
-        resp = await fetch(finalUrl, {
-            method: 'PUT',
-            headers: {
-                Authorization: authorization,
-                'x-cos-security-token': tempCred.Token
-                // 注意：不设 Host / Content-Length，浏览器会自动处理；代理会转发目标 Host
-            },
-            body: blob
-        });
-    } catch (err) {
-        if (!ctx.useProxy && ctx.localServerUrl) {
-            const proxyUrl = wrapProxy(url, { ...ctx, useProxy: true });
-            resp = await fetch(proxyUrl, {
+    
+    // 如果提供了 tcb 实例，则通过云函数代理上传（解决浏览器 CORS 问题）
+    if (ctx.tcb) {
+        try {
+            const proxyResult = await ctx.tcb.callFunction({
+                name: 'vodstudio-proxy',
+                data: {
+                    httpMethod: 'PUT',
+                    path: '/cos-put',
+                    queryString: { url: `https://${host}${encodedKey}` },
+                    headers: {
+                        Authorization: authorization,
+                        'x-cos-security-token': tempCred.Token
+                    },
+                    body: await blob.arrayBuffer().then(arrayBufferToBase64),
+                    isBase64Encoded: true
+                }
+            });
+            
+            const { statusCode, headers: respHeaders, body: respBody, isBase64Encoded } = proxyResult.result || {};
+            const bodyText = isBase64Encoded ? atob(respBody) : (respBody || '');
+            
+            resp = {
+                ok: statusCode >= 200 && statusCode < 300,
+                status: statusCode || 500,
+                headers: new Headers(respHeaders || {}),
+                text: async () => bodyText,
+                json: async () => { try { return JSON.parse(bodyText); } catch (e) { return {}; } }
+            };
+        } catch (err) {
+            throw new Error(`[VOD Upload/COS PUT] 云函数调用失败: ${err?.message || err}`);
+        }
+    } else {
+        // 原有逻辑：通过 fetch 上传（本地代理或直接）
+        const url = `https://${host}${encodedKey}`;
+        const finalUrl = wrapProxy(url, ctx);
+        try {
+            resp = await fetch(finalUrl, {
                 method: 'PUT',
                 headers: {
                     Authorization: authorization,
                     'x-cos-security-token': tempCred.Token
+                    // 注意：不设 Host / Content-Length，浏览器会自动处理；代理会转发目标 Host
                 },
                 body: blob
             });
-        } else {
-            throw new Error(`[VOD Upload/COS PUT] 网络请求失败，可能是浏览器 CORS 限制。请确认 CORS 转发服务可用: ${err?.message || err}`);
+        } catch (err) {
+            if (!ctx.useProxy && ctx.localServerUrl) {
+                const proxyUrl = wrapProxy(url, { ...ctx, useProxy: true });
+                resp = await fetch(proxyUrl, {
+                    method: 'PUT',
+                    headers: {
+                        Authorization: authorization,
+                        'x-cos-security-token': tempCred.Token
+                    },
+                    body: blob
+                });
+            } else {
+                throw new Error(`[VOD Upload/COS PUT] 网络请求失败，可能是浏览器 CORS 限制。请确认 CORS 转发服务可用: ${err?.message || err}`);
+            }
         }
     }
+    
     if (!resp.ok) {
         const text = await resp.text().catch(() => '');
         throw new Error(`[VOD Upload/COS PUT] HTTP ${resp.status}: ${text.slice(0, 300)}`);

@@ -49,6 +49,19 @@ import React, { useState, useRef, useEffect, useCallback, useMemo, memo } from '
 import { createPortal } from 'react-dom';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+import cloudbase from '@cloudbase/js-sdk';
+const tcb = cloudbase.init({
+    env: 'test234-d0g5z9qyae01763f6',
+    region: 'ap-shanghai',
+    accessKey: 'eyJhbGciOiJSUzI1NiIsImtpZCI6IjlkMWRjMzFlLWI0ZDAtNDQ4Yi1hNzZmLWIwY2M2M2Q4MTQ5OCJ9.eyJpc3MiOiJodHRwczovL3Rlc3QyMzQtZDBnNXo5cXlhZTAxNzYzZjYuYXAtc2hhbmdoYWkudGNiLWFwaS50ZW5jZW50Y2xvdWRhcGkuY29tIiwic3ViIjoiYW5vbiIsImF1ZCI6InRlc3QyMzQtZDBnNXo5cXlhZTAxNzYzZjYiLCJleHAiOjQwODI3NTgwNjEsImlhdCI6MTc3OTA3NDg2MSwibm9uY2UiOiJkUmVaQl9WZ1NVNldnV3lKU1ZWUFdBIiwiYXRfaGFzaCI6ImRSZVpCX1ZnU1U2V2dXeUpTVlZQV0EiLCJuYW1lIjoiQW5vbnltb3VzIiwic2NvcGUiOiJhbm9ueW1vdXMiLCJwcm9qZWN0X2lkIjoidGVzdDIzNC1kMGc1ejlxeWFlMDE3NjNmNiIsIm1ldGEiOnsicGxhdGZvcm0iOiJQdWJsaXNoYWJsZUtleSJ9LCJ1c2VyX3R5cGUiOiIiLCJjbGllbnRfdHlwZSI6ImNsaWVudF91c2VyIiwiaXNfc3lzdGVtX2FkbWluIjpmYWxzZX0.UdDiUQFnMxgUKtRCGoEJ0sr3j4fhghteR7w_W5bhzA_XiQA_5CMQ0Ll7KJHKNZturgQMYyxCZXjdBSsUGx9FRTuk8m_Qe3Tlg7uYZjcex8J2189Qh_5X9tYEEHajx_jY2973zNyUU7H7Afb_FQsN_TKtM13358-4xZP2obJhtvDTywaqgtlS950Aw1ZPPCxT3l8UdqCDLqb1txnTLmO5wGnJfLMeHb-HDvw4FLYVeIpc1gK3zxA7D7mRDhO_ssosimP9jRWIA7EU6rY6PpW6vHsm9CL40GrXVGieGxe3rvglsYd0uk1qupXo0lqKrHwu10IzJuw5bUXFaD5_p30qTA',
+    auth: { detectSessionInUrl: true }
+});
+// 创建 auth 实例可让 SDK 使用 Publishable Key 调用云函数；不依赖匿名登录开关
+const tcbAuth = tcb.auth({ persistence: 'local' });
+function ensureTcbAuth() {
+    return tcbAuth.getSession().catch(() => null);
+}
+
 // V3.5.20-1: Direct icon imports for better performance (eliminates wrapper overhead)
 import {
     Plus, Image as ImageIcon, Video, Settings, X, Play, Layers, MousePointer2, Wand2, Loader2,
@@ -16778,14 +16791,42 @@ function TapnowApp() {
                 : null;
             const vodProvider = normalizeProviderConfig(TENCENT_VOD_PROVIDER_KEY, providers[TENCENT_VOD_PROVIDER_KEY] || {});
             const vodUseProxy = true;
-            const vodProxyBase = (localServerUrl || 'http://127.0.0.1:9527').trim().replace(/\/+$/, '');
+            const isCloudDeployment = typeof window !== 'undefined' && window.location.hostname.includes('tcloudbaseapp.com');
+            let vodProxyBase = '';
+            let vodProxyViaCloudFunction = false;
             const vodStartTime = Date.now();
-            try {
-                const pingResp = await fetch(`${vodProxyBase}/ping`, { method: 'GET' });
-                if (!pingResp.ok) throw new Error(`HTTP ${pingResp.status}`);
-            } catch (err) {
-                alert(`腾讯云 VOD 调用需要启动本地 CORS 转发服务：\n\nnode proxy-server.mjs\n\n当前无法连接 ${vodProxyBase}/ping：${err?.message || err}`);
-                return;
+            
+            if (isCloudDeployment) {
+                // 云端环境：使用 CloudBase JS SDK 调用云函数（确保已匿名登录）
+                try {
+                    await ensureTcbAuth();
+                    const pingResult = await tcb.callFunction({
+                        name: 'vodstudio-proxy',
+                        data: {
+                            httpMethod: 'GET',
+                            path: '/ping',
+                            headers: {},
+                            body: ''
+                        }
+                    });
+                    if (!pingResult.result || pingResult.result.statusCode !== 200) {
+                        throw new Error('Cloud function ping failed');
+                    }
+                    vodProxyViaCloudFunction = true;
+                } catch (err) {
+                    alert(`云端环境：无法调用云函数 vodstudio-proxy\n${err?.message || err}`);
+                    return;
+                }
+            } else {
+                // 本地环境：使用本地代理
+                vodProxyBase = (localServerUrl || 'http://127.0.0.1:9527').trim().replace(/\/+$/, '');
+                try {
+                    const pingResp = await fetch(`${vodProxyBase}/ping`, { method: 'GET' });
+                    if (!pingResp.ok) throw new Error(`HTTP ${pingResp.status}`);
+                } catch (err) {
+                    alert(`腾讯云 VOD 调用需要启动本地 CORS 转发服务：\n\nnode proxy-server.mjs\n\n当前无法连接 ${vodProxyBase}/ping：${err?.message || err}`);
+                    return;
+                }
             }
             let vodCreds;
             try {
@@ -16847,7 +16888,8 @@ function TapnowApp() {
                     }, {
                         credentials: vodCreds,
                         useProxy: vodUseProxy,
-                        localServerUrl: localServerUrl,
+                        localServerUrl: vodProxyViaCloudFunction ? '' : (vodProxyBase || localServerUrl),
+                        tcb: vodProxyViaCloudFunction ? tcb : null,
                         onStage: (stage, info) => {
                             let progress = 10;
                             if (stage === 'upload_start') progress = 10 + Math.round((info.index / Math.max(1, info.total)) * 20);
