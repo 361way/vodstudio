@@ -69,7 +69,7 @@ import {
     ArrowRightSquare, MessageSquare, Send, Paperclip, FileText, FileAudio, FileVideo, FileImage,
     ChevronRight, ChevronLeft, MoreHorizontal, Bot, User, Users, GripVertical, Forward, RefreshCw,
     RotateCcw, RotateCw, Split, ChevronsUp, ChevronsDown, Maximize2, Sun, Moon, FileSearch,
-    Sparkles, Mic, Mic2, Camera, Code, ClipboardCopy, Edit, LayoutGrid, Check, CheckSquare, Eye,
+    Sparkles, Mic, Mic2, Camera, Code, ClipboardCopy, Edit, LayoutGrid, Check, CheckSquare, Eye, EyeOff,
     Scissors, Layout, Download, Save, FolderOpen, Brush, Undo2, Eraser, HardDrive, ChevronDown, ChevronUp, UploadCloud,
     Monitor,
     Zap, // V3.5.24
@@ -98,6 +98,63 @@ import {
 const DEFAULT_VIEW = { x: 0, y: 0, zoom: 1 };
 const t = i18n.t.bind(i18n);
 
+const LEGACY_LOCAL_STORAGE_PREFIX = 'tapnow_';
+const CURRENT_LOCAL_STORAGE_PREFIX = 'studio_';
+
+const normalizeLocalStorageKey = (key) => {
+    const rawKey = String(key || '');
+    return rawKey.startsWith(LEGACY_LOCAL_STORAGE_PREFIX)
+        ? `${CURRENT_LOCAL_STORAGE_PREFIX}${rawKey.slice(LEGACY_LOCAL_STORAGE_PREFIX.length)}`
+        : rawKey;
+};
+
+const installStudioLocalStorageAlias = () => {
+    if (typeof window === 'undefined' || !window.localStorage || window.__studioLocalStorageAliasInstalled) return;
+    window.__studioLocalStorageAliasInstalled = true;
+    try {
+        const storage = window.localStorage;
+        const StorageProto = Object.getPrototypeOf(storage);
+        const originalGetItem = StorageProto.getItem;
+        const originalSetItem = StorageProto.setItem;
+        const originalRemoveItem = StorageProto.removeItem;
+
+        const legacyKeys = [];
+        for (let index = 0; index < storage.length; index += 1) {
+            const key = storage.key(index);
+            if (key && key.startsWith(LEGACY_LOCAL_STORAGE_PREFIX)) legacyKeys.push(key);
+        }
+        legacyKeys.forEach((legacyKey) => {
+            const nextKey = normalizeLocalStorageKey(legacyKey);
+            const legacyValue = originalGetItem.call(storage, legacyKey);
+            if (legacyValue !== null && originalGetItem.call(storage, nextKey) === null) {
+                originalSetItem.call(storage, nextKey, legacyValue);
+            }
+            originalRemoveItem.call(storage, legacyKey);
+        });
+
+        StorageProto.getItem = function (key) {
+            if (this !== storage) return originalGetItem.call(this, key);
+            const nextKey = normalizeLocalStorageKey(key);
+            const value = originalGetItem.call(this, nextKey);
+            if (value !== null || nextKey === String(key || '')) return value;
+            return originalGetItem.call(this, key);
+        };
+        StorageProto.setItem = function (key, value) {
+            if (this !== storage) return originalSetItem.call(this, key, value);
+            return originalSetItem.call(this, normalizeLocalStorageKey(key), value);
+        };
+        StorageProto.removeItem = function (key) {
+            if (this !== storage) return originalRemoveItem.call(this, key);
+            const nextKey = normalizeLocalStorageKey(key);
+            originalRemoveItem.call(this, nextKey);
+            if (nextKey !== String(key || '')) originalRemoveItem.call(this, key);
+        };
+    } catch (error) {
+        console.warn('[StudioStorage] localStorage prefix migration failed:', error);
+    }
+};
+
+installStudioLocalStorageAlias();
 
 // --- MaskVisualFeedback 组件：蒙版视觉反馈层 ---
 const MaskVisualFeedback = ({ canvasRef, isDrawing }) => {
@@ -1827,7 +1884,13 @@ const IMAGE_TASK_TIMEOUT_MS = 60 * 1000;
 const VIDEO_TASK_TIMEOUT_MS = 5 * 60 * 1000;
 
 // --- 默认配置 ---
-const DEFAULT_BASE_URL = 'https://ai.comfly.chat';
+const TOKENHUB_BASE_URL = 'https://tokenhub.tencentmaas.com';
+const LEGACY_DEFAULT_BASE_URL = 'https://ai.comfly.chat';
+const LOCAL_PROXY_DEFAULT_URL = 'http://127.0.0.1:9527';
+const CLOUD_FUNCTION_PROXY_LEGACY_URL = 'https://test234-d0g5z9qyae01763f6-1305660054.ap-shanghai.app.tcloudbase.com';
+const DEFAULT_BASE_URL = TOKENHUB_BASE_URL;
+const DEFAULT_TOKENHUB_MODEL_ID = 'hy3-preview';
+const TOKENHUB_PROVIDER_KEY = 'openai';
 const TENCENT_VOD_BASE_URL = `https://${VOD_API_HOST}`;
 
 // 即梦API配置（代理地址，默认本地5100端口）
@@ -1855,6 +1918,21 @@ const getVodDefaultModelNameByType = (type) => type === 'video'
 const getVodDefaultModelVersionByType = (type) => type === 'video'
     ? VOD_DEFAULT_VIDEO_MODEL_VERSION
     : VOD_DEFAULT_IMAGE_MODEL_VERSION;
+
+const VOD_LEGACY_DEFAULT_MODEL_SELECTIONS = {
+    image: { modelName: 'GG', modelVersion: '2.5' },
+    video: { modelName: 'GV', modelVersion: '3.1-fast' }
+};
+
+const shouldMigrateVodLegacyDefaultSelection = (type, modelName, modelVersion) => {
+    const legacy = VOD_LEGACY_DEFAULT_MODEL_SELECTIONS[type];
+    if (!legacy) return false;
+    const defaultModelName = getVodDefaultModelNameByType(type);
+    const defaultModelVersion = getVodDefaultModelVersionByType(type);
+    return modelName === legacy.modelName
+        && modelVersion === legacy.modelVersion
+        && (modelName !== defaultModelName || modelVersion !== defaultModelVersion);
+};
 
 const getVodConfigType = (config) => {
     if (!config || config.provider !== TENCENT_VOD_PROVIDER_KEY) return null;
@@ -1910,6 +1988,14 @@ const getVodSelectionFromCustomParams = (type, customParams) => {
     const versions = matrix[modelName] || [];
     let modelVersion = readDefault(['vod-model-version'], ['ModelVersion', 'modelVersion']) || getVodDefaultModelVersionByType(type);
     if (!versions.includes(modelVersion)) modelVersion = versions.includes(getVodDefaultModelVersionByType(type)) ? getVodDefaultModelVersionByType(type) : (versions[0] || '');
+    if (shouldMigrateVodLegacyDefaultSelection(type, modelName, modelVersion)) {
+        modelName = getVodDefaultModelNameByType(type);
+        const defaultVersions = matrix[modelName] || [];
+        modelVersion = defaultVersions.includes(getVodDefaultModelVersionByType(type))
+            ? getVodDefaultModelVersionByType(type)
+            : (defaultVersions[0] || '');
+        return { modelName, modelVersion, versions: defaultVersions };
+    }
     return { modelName, modelVersion, versions };
 };
 
@@ -1928,12 +2014,8 @@ const buildVodCustomParamsWithSelection = (type, modelName, modelVersion) => {
 
 // V3.6.0: 模型配置（简化版 - id 即 modelName，无 displayName）
 const DEFAULT_API_CONFIGS = [
-    // Chat Models
-    { id: 'gpt-5.1', provider: 'openai', type: 'Chat' },
-    { id: 'gpt-5.2', provider: 'openai', type: 'Chat' },
-    { id: 'gpt-4o', provider: 'openai', type: 'Chat' },
-    { id: 'deepseek-v3-1-250821', provider: 'deepseek', type: 'Chat' },
-    { id: 'gemini-3-pro-preview', provider: 'google', type: 'Chat' },
+    // TokenHub Chat Model
+    { id: DEFAULT_TOKENHUB_MODEL_ID, provider: TOKENHUB_PROVIDER_KEY, type: 'Chat', apiType: 'openai' },
 
     // Image Models
     { id: 'MJ V6', provider: 'midjourney', type: 'Image' },
@@ -1949,8 +2031,6 @@ const DEFAULT_API_CONFIGS = [
     { id: 'nanobanana', provider: 'jimeng', type: 'Image' },
 
     // Video Models
-    { id: 'sora-2', provider: 'openai', type: 'Video', durations: ['5s', '10s'] },
-    { id: 'sora-2-pro', provider: 'openai', type: 'Video', durations: ['15s', '25s'] },
     { id: 'jimeng-video-3.5-pro', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
     { id: 'jimeng-video-veo3', provider: 'jimeng', type: 'Video', durations: ['8s'] },
     { id: 'jimeng-video-veo3.1', provider: 'jimeng', type: 'Video', durations: ['8s'] },
@@ -2065,6 +2145,23 @@ const DELETED_MODEL_IDS = [
 ];
 const REMOVED_PROVIDER_KEYS = ['yunwu'];
 const isRemovedProviderKey = (providerKey) => REMOVED_PROVIDER_KEYS.includes(String(providerKey || '').trim());
+const TOKENHUB_VISIBLE_MODEL_IDS = [DEFAULT_TOKENHUB_MODEL_ID];
+const SETTINGS_PROVIDER_KEYS = [TOKENHUB_PROVIDER_KEY, TENCENT_VOD_PROVIDER_KEY];
+const isSettingsProviderVisible = (providerKey) => SETTINGS_PROVIDER_KEYS.includes(String(providerKey || '').trim());
+const isSettingsProviderFixed = (providerKey) => isSettingsProviderVisible(providerKey);
+const getSettingsProviderDisplayName = (providerKey, fallback = '') => (
+    providerKey === TOKENHUB_PROVIDER_KEY ? 'tokenhub' : (fallback || providerKey)
+);
+const getSettingsProviderModels = (providerKey, models = []) => {
+    const list = Array.isArray(models) ? models : [];
+    if (providerKey === TOKENHUB_PROVIDER_KEY) {
+        return list.filter((item) => TOKENHUB_VISIBLE_MODEL_IDS.includes(String(item?.id || item?.modelName || '').trim()));
+    }
+    if (providerKey === TENCENT_VOD_PROVIDER_KEY) {
+        return list.filter((item) => !!getVodConfigType(item));
+    }
+    return list;
+};
 
 const ASYNC_CONFIG_TEMPLATE = {
     enabled: true,
@@ -5741,14 +5838,33 @@ function TapnowApp() {
 
     useEffect(() => {
         setProviders(prev => {
-            if (prev?.[TENCENT_VOD_PROVIDER_KEY]) return prev;
-            return {
-                ...prev,
-                [TENCENT_VOD_PROVIDER_KEY]: normalizeProviderConfig(
+            const next = { ...(prev || {}) };
+            let changed = false;
+            if (!next[TOKENHUB_PROVIDER_KEY]) {
+                next[TOKENHUB_PROVIDER_KEY] = normalizeProviderConfig(
+                    TOKENHUB_PROVIDER_KEY,
+                    DEFAULT_PROVIDERS[TOKENHUB_PROVIDER_KEY]
+                );
+                changed = true;
+            } else if (
+                next[TOKENHUB_PROVIDER_KEY]?.apiType !== 'openai'
+                || !next[TOKENHUB_PROVIDER_KEY]?.url
+                || next[TOKENHUB_PROVIDER_KEY]?.url === LEGACY_DEFAULT_BASE_URL
+            ) {
+                next[TOKENHUB_PROVIDER_KEY] = normalizeProviderConfig(
+                    TOKENHUB_PROVIDER_KEY,
+                    { ...next[TOKENHUB_PROVIDER_KEY], apiType: 'openai', url: TOKENHUB_BASE_URL }
+                );
+                changed = true;
+            }
+            if (!next[TENCENT_VOD_PROVIDER_KEY]) {
+                next[TENCENT_VOD_PROVIDER_KEY] = normalizeProviderConfig(
                     TENCENT_VOD_PROVIDER_KEY,
                     DEFAULT_PROVIDERS[TENCENT_VOD_PROVIDER_KEY]
-                )
-            };
+                );
+                changed = true;
+            }
+            return changed ? next : prev;
         });
         setApiConfigs(prev => {
             let changed = false;
@@ -5968,7 +6084,11 @@ function TapnowApp() {
 
     // V2.6.1 Feature: 本地服务器 URL
     const [localServerUrl, setLocalServerUrl] = useState(() => {
-        return localStorage.getItem('tapnow_local_server_url') || 'https://test234-d0g5z9qyae01763f6-1305660054.ap-shanghai.app.tcloudbase.com';
+        const saved = localStorage.getItem('tapnow_local_server_url') || '';
+        if (!saved || saved.includes(CLOUD_FUNCTION_PROXY_LEGACY_URL) || saved.includes('app.tcloudbase.com') || saved.includes('tcloudbaseapp.com')) {
+            return LOCAL_PROXY_DEFAULT_URL;
+        }
+        return saved;
     });
 
     // V2.6.1 Feature: 本地缓存服务器状态
@@ -6485,7 +6605,7 @@ function TapnowApp() {
     const [chatWidth, setChatWidth] = useState(400);
     const [chatFiles, setChatFiles] = useState([]);
     const [chatModel, setChatModel] = useState(() => {
-        try { return localStorage.getItem('tapnow_chat_model') || 'gemini-3-pro'; } catch { return 'gemini-3-pro'; }
+        try { return localStorage.getItem('tapnow_chat_model') || DEFAULT_TOKENHUB_MODEL_ID; } catch { return DEFAULT_TOKENHUB_MODEL_ID; }
     });
     const [chatModelDropdownOpen, setChatModelDropdownOpen] = useState(false);
     const [chatHoveredProvider, setChatHoveredProvider] = useState(null);
@@ -6657,6 +6777,10 @@ function TapnowApp() {
     const [inputImageContextMenu, setInputImageContextMenu] = useState({ visible: false, x: 0, y: 0, nodeId: null });
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [settingsTab, setSettingsTab] = useState('providers');
+    const [visibleApiKeys, setVisibleApiKeys] = useState({});
+    const toggleApiKeyVisibility = useCallback((key) => {
+        setVisibleApiKeys(prev => ({ ...prev, [key]: !prev?.[key] }));
+    }, []);
     const [editingApiModels, setEditingApiModels] = useState(() => new Set());
     const [editingLibraryModels, setEditingLibraryModels] = useState(() => new Set());
     const [libraryPreviewModels, setLibraryPreviewModels] = useState(() => new Set());
@@ -9519,7 +9643,7 @@ function TapnowApp() {
         if (!modelId) return '选择模型';
         const config = getApiConfigByKey(modelId);
         const providerKey = config?.provider || '';
-        const providerLabel = providerKey || '';
+        const providerLabel = providerKey ? getSettingsProviderDisplayName(providerKey, providerKey) : '';
         const modelLabel = config?.modelName || config?.displayName || config?.id || modelId;
         if (providerLabel) return `${providerLabel} / ${modelLabel}`;
         return modelLabel;
@@ -9800,6 +9924,29 @@ function TapnowApp() {
         return groups;
     }, [apiConfigs, providers, resolveApiConfig]);
 
+    const chatPanelModelOptions = useMemo(() => {
+        return Object.entries(groupedApiConfigs)
+            .filter(([providerKey]) => isSettingsProviderVisible(providerKey))
+            .flatMap(([providerKey, group]) => getSettingsProviderModels(providerKey, group.models)
+                .filter(isChatPanelSelectableModel)
+                .map((model) => ({ providerKey, model, modelKey: model._uid || model.id }))
+            )
+            .filter((item) => item.modelKey);
+    }, [groupedApiConfigs]);
+
+    useEffect(() => {
+        if (!chatPanelModelOptions.length) return;
+        const currentModelKey = resolveModelKey(chatModel);
+        const currentIsVisible = chatPanelModelOptions.some((item) => item.modelKey === currentModelKey);
+        if (currentIsVisible) return;
+        const tokenhubDefault = chatPanelModelOptions.find((item) => (
+            item.providerKey === TOKENHUB_PROVIDER_KEY
+            && (item.model.id === DEFAULT_TOKENHUB_MODEL_ID || item.model.modelName === DEFAULT_TOKENHUB_MODEL_ID)
+        ));
+        setChatModel(tokenhubDefault?.modelKey || chatPanelModelOptions[0].modelKey);
+        setChatCustomParams({});
+    }, [chatModel, chatPanelModelOptions, resolveModelKey]);
+
     const getFirstEnabledModelKey = useCallback((mode = 'image') => {
         const storageKey = mode === 'image' ? 'tapnow_last_image_model' : 'tapnow_last_video_model';
         const preferredFromState = mode === 'image' ? lastUsedImageModel : lastUsedVideoModel;
@@ -9823,6 +9970,28 @@ function TapnowApp() {
                 && (mode === 'image' ? isImageModelType(config.type) : config.type === 'Video'));
         return resolveModelKey(fallback?._uid || fallback?.id || '');
     }, [lastUsedImageModel, lastUsedVideoModel, resolveModelKey, getApiConfigByKey, apiConfigs, resolveApiConfig]);
+
+    const getStoryboardDefaultModelKey = useCallback((mode = 'image') => {
+        const normalizedMode = mode === 'video' ? 'video' : 'image';
+        const targetId = normalizedMode === 'video' ? VOD_VIDEO_MODEL_ID : VOD_IMAGE_MODEL_ID;
+        const targetKey = resolveModelKey(targetId);
+        const targetConfig = getApiConfigByKey(targetKey || targetId);
+        const matchesType = targetConfig
+            && !targetConfig.disabled
+            && targetConfig.provider === TENCENT_VOD_PROVIDER_KEY
+            && (normalizedMode === 'image' ? isImageModelType(targetConfig.type) : targetConfig.type === 'Video');
+        if (matchesType) return targetKey || targetId;
+
+        const fallbackVod = apiConfigs
+            .map((config) => resolveApiConfig(config))
+            .find((config) => config
+                && !config.disabled
+                && config.provider === TENCENT_VOD_PROVIDER_KEY
+                && (normalizedMode === 'image' ? isImageModelType(config.type) : config.type === 'Video'));
+        if (fallbackVod) return resolveModelKey(fallbackVod._uid || fallbackVod.id || '');
+
+        return getFirstEnabledModelKey(normalizedMode);
+    }, [apiConfigs, getApiConfigByKey, getFirstEnabledModelKey, resolveApiConfig, resolveModelKey]);
 
     const getRatiosForModel = useCallback((modelId) => {
         if (!modelId) return RATIOS;
@@ -21932,11 +22101,11 @@ function TapnowApp() {
     }, [nodesMap, updateNodeSettings]);
 
     const resolveStoryboardChatCredentials = useCallback((nodeId) => {
-        const candidates = [chatModel, lastUsedExtractModel, lastUsedAnalyzeModel]
-            .map((id) => resolveModelKey(id || ''))
-            .filter(Boolean);
+        const candidates = [];
+        const defaultTokenHubKey = resolveModelKey(DEFAULT_TOKENHUB_MODEL_ID);
+        if (defaultTokenHubKey) candidates.push(defaultTokenHubKey);
         apiConfigs
-            .filter((config) => isChatModelType(config.type))
+            .filter((config) => isChatModelType(config.type) && config.provider === TOKENHUB_PROVIDER_KEY)
             .forEach((config) => {
                 const key = resolveModelKey(config._uid || config.id || '');
                 if (key) candidates.push(key);
@@ -21944,16 +22113,104 @@ function TapnowApp() {
         const uniqueCandidates = [...new Set(candidates)];
         for (const modelId of uniqueCandidates) {
             const credentials = getApiCredentials(modelId);
-            if (credentials?.key) {
+            if (credentials?.key && credentials.provider === TOKENHUB_PROVIDER_KEY) {
                 if (modelId !== chatModel) setChatModel(modelId);
-                return { modelId, credentials };
+                return {
+                    modelId,
+                    credentials: {
+                        ...credentials,
+                        provider: TOKENHUB_PROVIDER_KEY,
+                        url: TOKENHUB_BASE_URL,
+                        modelName: credentials.modelName || DEFAULT_TOKENHUB_MODEL_ID
+                    }
+                };
             }
         }
-        updateNodeSettings(nodeId, { errorMsg: '请先在设置中配置一个可用的大模型 Key' });
-        showToast('请先在设置中配置一个可用的大模型 Key', 'warning', 3200);
+        updateNodeSettings(nodeId, { errorMsg: '请先在 API 设置的 tokenhub 中配置一个可用的大模型 Key' });
+        showToast('请先在 API 设置的 tokenhub 中配置一个可用的大模型 Key', 'warning', 3200);
         setSettingsOpen(true);
         return null;
-    }, [apiConfigs, chatModel, getApiCredentials, lastUsedAnalyzeModel, lastUsedExtractModel, setChatModel, setSettingsOpen, showToast, updateNodeSettings]);
+    }, [apiConfigs, chatModel, getApiCredentials, resolveModelKey, setChatModel, setSettingsOpen, showToast, updateNodeSettings]);
+
+    const fetchStoryboardChatCompletion = useCallback(async ({ baseUrl, apiKey, providerKey, model, messages }) => {
+        const configuredEndpoint = `${String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/v1/chat/completions`;
+        const tokenHubEndpoint = `${TOKENHUB_BASE_URL}/v1/chat/completions`;
+        const headers = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+        const body = JSON.stringify({ model, messages, stream: false });
+        const requestInit = { method: 'POST', headers, body };
+        const isTokenHubProvider = providerKey === TOKENHUB_PROVIDER_KEY;
+        const isCloudDeployment = typeof window !== 'undefined' && window.location.hostname.includes('tcloudbaseapp.com');
+        let configuredIsTokenHub = false;
+        try {
+            configuredIsTokenHub = new URL(configuredEndpoint).hostname === 'tokenhub.tencentmaas.com';
+        } catch { }
+        const cloudFunctionEndpoint = (isTokenHubProvider || configuredIsTokenHub) ? tokenHubEndpoint : '';
+        const callCloudFunctionProxy = async (endpoint) => {
+            await ensureTcbAuth();
+            const proxyResult = await tcb.callFunction({
+                name: 'vodstudio-proxy',
+                data: {
+                    httpMethod: 'POST',
+                    path: '/proxy',
+                    queryString: { url: endpoint },
+                    url: endpoint,
+                    headers,
+                    body
+                }
+            });
+            const { statusCode, headers: respHeaders, body: respBody, isBase64Encoded } = proxyResult.result || {};
+            const bodyText = isBase64Encoded ? atob(respBody || '') : (respBody || '');
+            return {
+                ok: statusCode >= 200 && statusCode < 300,
+                status: statusCode || 500,
+                headers: new Headers(respHeaders || {}),
+                text: async () => bodyText,
+                json: async () => {
+                    try { return JSON.parse(bodyText || '{}'); } catch { return {}; }
+                }
+            };
+        };
+
+        if (isCloudDeployment && cloudFunctionEndpoint) {
+            try {
+                return await callCloudFunctionProxy(cloudFunctionEndpoint);
+            } catch (error) {
+                console.warn('[StoryboardChat] Cloud function proxy failed, fallback to browser fetch:', error);
+            }
+        }
+
+        const fetchUrls = Array.from(new Set([
+            buildProxyUrl(configuredEndpoint, providerKey),
+            configuredEndpoint,
+            isTokenHubProvider ? tokenHubEndpoint : ''
+        ].filter(Boolean)));
+        let lastFetchError = null;
+
+        for (const url of fetchUrls) {
+            try {
+                const response = await fetch(url, requestInit);
+                if (url !== configuredEndpoint && !response.ok) {
+                    lastFetchError = new Error(`proxy request failed (${response.status})`);
+                    continue;
+                }
+                return response;
+            } catch (error) {
+                lastFetchError = error;
+            }
+        }
+
+        if (cloudFunctionEndpoint) {
+            try {
+                return await callCloudFunctionProxy(cloudFunctionEndpoint);
+            } catch (proxyError) {
+                const directMessage = lastFetchError?.message || String(lastFetchError || 'browser fetch failed');
+                const proxyMessage = proxyError?.message || String(proxyError || 'cloud function proxy failed');
+                throw new Error(`大模型请求失败：浏览器请求失败，云函数代理也失败（${directMessage}；${proxyMessage}）`);
+            }
+        }
+
+        throw new Error(`大模型请求失败：${lastFetchError?.message || 'Failed to fetch'}`);
+    }, [buildProxyUrl]);
 
     const runStoryboardLlmSplit = async (nodeId, mode = 'script') => {
         const node = nodesMap.get(nodeId);
@@ -21983,23 +22240,21 @@ function TapnowApp() {
 
         const resolvedChat = resolveStoryboardChatCredentials(nodeId);
         if (!resolvedChat) return;
-        const { modelId: storyboardChatModel, credentials: { key: apiKey, url: baseUrl, modelName } } = resolvedChat;
+        const { modelId: storyboardChatModel, credentials: { key: apiKey, url: baseUrl, modelName, provider: providerKey } } = resolvedChat;
 
         try {
             saveToUndoStack();
             updateNodeSettings(nodeId, { isGenerating: true, errorMsg: '', llmPromptMode: normalizedMode, scriptText });
             const systemPrompt = getStoryboardPromptTemplate(normalizedMode, node.settings);
-            const response = await fetch(`${baseUrl}/v1/chat/completions`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    model: modelName || storyboardChatModel,
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: scriptText }
-                    ],
-                    stream: false
-                })
+            const response = await fetchStoryboardChatCompletion({
+                baseUrl,
+                apiKey,
+                providerKey,
+                model: modelName || storyboardChatModel,
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: scriptText }
+                ]
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
@@ -22012,7 +22267,7 @@ function TapnowApp() {
             }
 
             const modeForShot = normalizeStoryboardMode(node.settings?.mode);
-            const defaultModel = getFirstEnabledModelKey(modeForShot);
+            const defaultModel = getStoryboardDefaultModelKey(modeForShot);
             const defaultRatio = getPreferredModelRatio(defaultModel, modeForShot);
             const defaultResolution = modeForShot === 'image'
                 ? getPreferredImageResolutionForModel(defaultModel)
@@ -22085,7 +22340,7 @@ function TapnowApp() {
         const promptBySceneIndex = options?.promptBySceneIndex instanceof Map ? options.promptBySceneIndex : new Map();
 
         const modeForShot = normalizeStoryboardMode(node.settings?.mode);
-        const defaultModel = getFirstEnabledModelKey(modeForShot);
+        const defaultModel = getStoryboardDefaultModelKey(modeForShot);
         const defaultRatio = getPreferredModelRatio(defaultModel, modeForShot);
         const defaultResolution = modeForShot === 'image'
             ? getPreferredImageResolutionForModel(defaultModel)
@@ -22117,7 +22372,7 @@ function TapnowApp() {
                 selectedImageIndex: Number.isInteger(baseShot.selectedImageIndex) ? baseShot.selectedImageIndex : -1
             };
         });
-    }, [getDefaultDurationForModel, getDefaultCustomParamsForModel, getFirstEnabledModelKey, getPreferredImageResolutionForModel, getPreferredModelRatio, getPreferredVideoResolutionForModel]);
+    }, [getDefaultDurationForModel, getDefaultCustomParamsForModel, getStoryboardDefaultModelKey, getPreferredImageResolutionForModel, getPreferredModelRatio, getPreferredVideoResolutionForModel]);
     const buildStoryboardTableSyncPatch = useCallback((node, tableInput, options = {}) => {
         const normalized = normalizeStoryboardTableData(tableInput);
         let headers = [...normalized.headers];
@@ -22162,7 +22417,7 @@ function TapnowApp() {
 
         const resolvedChat = resolveStoryboardChatCredentials(nodeId);
         if (!resolvedChat) return;
-        const { modelId: storyboardChatModel, credentials: { key: apiKey, url: baseUrl, modelName } } = resolvedChat;
+        const { modelId: storyboardChatModel, credentials: { key: apiKey, url: baseUrl, modelName, provider: providerKey } } = resolvedChat;
 
         const tableRowsForPrompt = normalizedTable.rows.map((row, rowIdx) => {
             const rowPayload = { scene_index: rowIdx + 1 };
@@ -22185,17 +22440,15 @@ function TapnowApp() {
                 '必须返回 JSON 数组，每项至少包含 scene_index 和 prompt 字段。',
                 JSON.stringify(tableRowsForPrompt, null, 2)
             ].join('\n\n');
-            const response = await fetch(`${baseUrl}/v1/chat/completions`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    model: modelName || storyboardChatModel,
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: userPrompt }
-                    ],
-                    stream: false
-                })
+            const response = await fetchStoryboardChatCompletion({
+                baseUrl,
+                apiKey,
+                providerKey,
+                model: modelName || storyboardChatModel,
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userPrompt }
+                ]
             });
             const data = await response.json();
             if (!response.ok) {
@@ -22237,7 +22490,7 @@ function TapnowApp() {
             updateNodeSettings(nodeId, { isGenerating: false, errorMsg: message });
             showToast(message, 'error', 2800);
         }
-    }, [buildStoryboardTableSyncPatch, getStoryboardPromptTemplate, nodesMap, normalizeStoryboardTableData, resolveStoryboardChatCredentials, saveToUndoStack, showToast, updateNodeSettings]);
+    }, [buildStoryboardTableSyncPatch, fetchStoryboardChatCompletion, getStoryboardPromptTemplate, nodesMap, normalizeStoryboardTableData, resolveStoryboardChatCredentials, saveToUndoStack, showToast, updateNodeSettings]);
     const importStoryboardMarkdownTable = useCallback((nodeId, markdownText, options = {}) => {
         const node = nodesMap.get(nodeId);
         if (!node || node.type !== 'storyboard-node') return false;
@@ -22282,7 +22535,7 @@ function TapnowApp() {
         }
         const resolvedChat = resolveStoryboardChatCredentials(nodeId);
         if (!resolvedChat) return;
-        const { modelId: storyboardChatModel, credentials: { key: apiKey, url: baseUrl, modelName } } = resolvedChat;
+        const { modelId: storyboardChatModel, credentials: { key: apiKey, url: baseUrl, modelName, provider: providerKey } } = resolvedChat;
         try {
             saveToUndoStack();
             updateNodeSettings(nodeId, {
@@ -22292,17 +22545,15 @@ function TapnowApp() {
                 scriptText: novelText,
                 viewMode: 'table'
             });
-            const response = await fetch(`${baseUrl}/v1/chat/completions`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    model: modelName || storyboardChatModel,
-                    messages: [
-                        { role: 'system', content: DEFAULT_STORYBOARD_NOVEL_TABLE_PROMPT },
-                        { role: 'user', content: novelText.substring(0, 30000) }
-                    ],
-                    stream: false
-                })
+            const response = await fetchStoryboardChatCompletion({
+                baseUrl,
+                apiKey,
+                providerKey,
+                model: modelName || storyboardChatModel,
+                messages: [
+                    { role: 'system', content: DEFAULT_STORYBOARD_NOVEL_TABLE_PROMPT },
+                    { role: 'user', content: novelText.substring(0, 30000) }
+                ]
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
@@ -22326,7 +22577,7 @@ function TapnowApp() {
             updateNodeSettings(nodeId, { isGenerating: false, errorMsg: message });
             showToast(message, 'error', 3200);
         }
-    }, [getConnectedNovelInputText, importStoryboardMarkdownTable, nodesMap, resolveStoryboardChatCredentials, saveToUndoStack, showToast, updateNodeSettings]);
+    }, [fetchStoryboardChatCompletion, getConnectedNovelInputText, importStoryboardMarkdownTable, nodesMap, resolveStoryboardChatCredentials, saveToUndoStack, showToast, updateNodeSettings]);
     const pasteStoryboardTableFromClipboard = useCallback(async (nodeId) => {
         const node = nodesMap.get(nodeId);
         if (!node || node.type !== 'storyboard-node') return;
@@ -22551,17 +22802,18 @@ function TapnowApp() {
 
         if (mode === 'image') {
             // 图片模式: 使用图片模型
-            defaultModel = getFirstEnabledModelKey('image');
+            defaultModel = getStoryboardDefaultModelKey('image');
             defaultRatio = getPreferredModelRatio(defaultModel, 'image');
             defaultResolution = getPreferredImageResolutionForModel(defaultModel);
             defaultDuration = undefined;  // 图片没有秒数
         } else {
             // 视频模式: 使用视频模型
-            defaultModel = getFirstEnabledModelKey('video');
+            defaultModel = getStoryboardDefaultModelKey('video');
             defaultRatio = getPreferredModelRatio(defaultModel, 'video');
             defaultResolution = getPreferredVideoResolutionForModel(defaultModel);
             defaultDuration = getDefaultDurationForModel(defaultModel);
         }
+        const defaultCustomParams = getDefaultCustomParamsForModel(defaultModel, null, { preserveByName: false });
 
         const newShot = {
             id: `shot-${Date.now()}`,
@@ -22577,6 +22829,7 @@ function TapnowApp() {
             ratio: defaultRatio,
             resolution: defaultResolution,
             duration: defaultDuration,
+            customParams: { ...defaultCustomParams },
             outputEnabled: false,  // V3.7.26: 默认不启用输出（需要用户确认）
             selectedImageIndex: -1  // V3.7.26: 默认不选中
         };
@@ -27600,7 +27853,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         : theme === 'dark' ? 'text-zinc-400 hover:text-zinc-300' : theme === 'solarized' ? 'text-zinc-600 hover:text-zinc-700' : 'text-zinc-600 hover:text-zinc-800'
                                                                         }`}
                                                                 >
-                                                                    {group.name || providerKey}
+                                                                    {getSettingsProviderDisplayName(providerKey, group.name)}
                                                                 </button>
                                                             ))}
                                                     </div>
@@ -27890,7 +28143,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 : theme === 'dark' ? 'text-zinc-400 hover:text-zinc-300' : theme === 'solarized' ? 'text-zinc-600 hover:text-zinc-700' : 'text-zinc-600 hover:text-zinc-800'
                                                                                 }`}
                                                                         >
-                                                                            {group.name || providerKey}
+                                                                            {getSettingsProviderDisplayName(providerKey, group.name)}
                                                                         </button>
                                                                     ))}
                                                             </div>
@@ -28131,7 +28384,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 : theme === 'dark' ? 'text-zinc-400 hover:text-zinc-300' : theme === 'solarized' ? 'text-zinc-600 hover:text-zinc-700' : 'text-zinc-600 hover:text-zinc-800'
                                                                                 }`}
                                                                         >
-                                                                            {group.name || providerKey}
+                                                                            {getSettingsProviderDisplayName(providerKey, group.name)}
                                                                         </button>
                                                                     ))}
                                                             </div>
@@ -28358,8 +28611,15 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     ? latestCompleted.output_images
                                     : (latestCompleted?.mjImages?.length ? latestCompleted.mjImages : (resolvedUrl ? [resolvedUrl] : []));
                                 const selectedImageIndex = node.settings?.selectedImageIndex ?? null;
-                                const defaultImageModel = resolveModelKey(lastUsedImageModel) || resolveModelKey(apiConfigs.find(c => isImageModelType(c.type))?.id) || '';
-                                const modelId = resolveModelKey(node.settings?.model || defaultImageModel);
+                                const defaultImageModel = resolveModelKey(VOD_IMAGE_MODEL_ID)
+                                    || resolveModelKey(apiConfigs.find(c => c.provider === TENCENT_VOD_PROVIDER_KEY && getVodConfigType(c) === 'image')?._uid)
+                                    || resolveModelKey(apiConfigs.find(c => c.provider === TENCENT_VOD_PROVIDER_KEY && getVodConfigType(c) === 'image')?.id)
+                                    || '';
+                                const rawModelId = resolveModelKey(node.settings?.model || '');
+                                const rawModelConfig = rawModelId ? getApiConfigByKey(rawModelId) : null;
+                                const modelId = rawModelConfig?.provider === TENCENT_VOD_PROVIDER_KEY && getVodConfigType(rawModelConfig) === 'image'
+                                    ? rawModelId
+                                    : defaultImageModel;
 
                                 return (
                                     <>
@@ -28373,7 +28633,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 <label className="text-[10px] block mb-1 text-zinc-500">选择模型</label>
                                                 <div className="relative">
                                                     <button
-                                                        onClick={(e) => { e.stopPropagation(); setActiveDropdown(activeDropdown?.nodeId === node.id && activeDropdown.type === 'role-image-model' ? null : { nodeId: node.id, type: 'role-image-model' }); }}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            const isOpen = activeDropdown?.nodeId === node.id && activeDropdown.type === 'role-image-model';
+                                                            setActiveDropdown(isOpen ? null : { nodeId: node.id, type: 'role-image-model' });
+                                                            setHoveredProvider(isOpen ? null : TENCENT_VOD_PROVIDER_KEY);
+                                                        }}
                                                         className={`w-full flex items-center justify-between px-2 py-1.5 rounded text-xs border transition-colors ${theme === 'dark'
                                                             ? 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:border-zinc-600'
                                                             : theme === 'solarized' ? 'bg-[#fdf6e3] border-[#eee8d5] text-zinc-800 hover:border-[#d7cfb2]' : 'bg-white border-zinc-300 text-zinc-800 hover:border-zinc-400'
@@ -28394,7 +28659,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         >
                                                             <div className={`w-24 border-r pr-1 max-h-80 overflow-y-auto custom-scrollbar flex flex-col ${theme === 'dark' ? 'border-zinc-700' : 'border-zinc-200'}`}>
                                                                 {Object.entries(groupedApiConfigs)
-                                                                    .filter(([, group]) => group.models.some(m => isImageModelType(m.type)))
+                                                                    .filter(([providerKey, group]) => providerKey === TENCENT_VOD_PROVIDER_KEY && group.models.some(m => getVodConfigType(m) === 'image'))
                                                                     .map(([providerKey, group]) => (
                                                                         <button
                                                                             key={providerKey}
@@ -28404,13 +28669,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 : theme === 'dark' ? 'text-zinc-400 hover:text-zinc-300' : theme === 'solarized' ? 'text-zinc-600 hover:text-zinc-700' : 'text-zinc-600 hover:text-zinc-800'
                                                                                 }`}
                                                                         >
-                                                                            {group.name || providerKey}
+                                                                            {getSettingsProviderDisplayName(providerKey, group.name)}
                                                                         </button>
                                                                     ))}
                                                             </div>
                                                             <div className="flex-1 pl-1 max-h-80 overflow-y-auto custom-scrollbar">
-                                                                {hoveredProvider && groupedApiConfigs[hoveredProvider]?.models
-                                                                    .filter(m => isImageModelType(m.type))
+                                                                {hoveredProvider === TENCENT_VOD_PROVIDER_KEY && groupedApiConfigs[TENCENT_VOD_PROVIDER_KEY]?.models
+                                                                    .filter(m => getVodConfigType(m) === 'image')
                                                                     .map((m) => {
                                                                         const modelKey = m._uid || m.id;
                                                                         const currentModelKey = resolveModelKey(node.settings?.model);
@@ -28570,7 +28835,6 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 onMouseDown={(e) => e.stopPropagation()}
                                                 onClick={() => {
                                                     const prompt = node.settings?.prompt || '';
-                                                    const modelId = resolveModelKey(node.settings?.model || lastUsedImageModel || apiConfigs.find(c => isImageModelType(c.type))?.id || '');
                                                     if (!prompt && (!node.settings?.referenceImages || node.settings.referenceImages.length === 0)) {
                                                         alert(t('请先输入提示词或添加参考图'));
                                                         return;
@@ -29711,7 +29975,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                             : theme === 'dark' ? 'text-zinc-400 hover:text-zinc-300' : theme === 'solarized' ? 'text-zinc-600 hover:text-zinc-700' : 'text-zinc-600 hover:text-zinc-800'
                                                                                             }`}
                                                                                     >
-                                                                                        {group.name || providerKey}
+                                                                                        {getSettingsProviderDisplayName(providerKey, group.name)}
                                                                                     </button>
                                                                                 ))}
                                                                         </div>
@@ -30302,7 +30566,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         e.stopPropagation();
                                                         // V3.7.19: 切换模式时更新所有镜头的模型为对应类型
                                                         const newMode = 'image';
-                                                        const defaultModel = getFirstEnabledModelKey('image');
+                                                        const defaultModel = getStoryboardDefaultModelKey('image');
                                                         const currentShots = node.settings?.shots || [];
                                                         // 只更新那些使用了错误类型模型的镜头
                                                         const updatedShots = currentShots.map(shot => {
@@ -30333,7 +30597,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         e.stopPropagation();
                                                         // V3.7.19: 切换模式时更新所有镜头的模型为对应类型
                                                         const newMode = 'video';
-                                                        const defaultModel = getFirstEnabledModelKey('video');
+                                                        const defaultModel = getStoryboardDefaultModelKey('video');
                                                         const currentShots = node.settings?.shots || [];
                                                         // 只更新那些使用了错误类型模型的镜头
                                                         const updatedShots = currentShots.map(shot => {
@@ -30441,7 +30705,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             const existingShots = node.settings?.shots || [];
                                                             const mergedShots = [...existingShots];
                                                             const mode = normalizeStoryboardMode(node.settings?.mode);
-                                                            const defaultModel = getFirstEnabledModelKey(mode);
+                                                            const defaultModel = getStoryboardDefaultModelKey(mode);
                                                             const defaultRatio = getPreferredModelRatio(defaultModel, mode);
                                                             const defaultResolution = mode === 'image'
                                                                 ? getPreferredImageResolutionForModel(defaultModel)
@@ -31108,7 +31372,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             const internalText = node.settings?.scriptText || '';
                                                             const text = connectedText || internalText;
                                                             const mode = normalizeStoryboardMode(node.settings?.mode);
-                                                            const defaultModel = getFirstEnabledModelKey(mode);
+                                                            const defaultModel = getStoryboardDefaultModelKey(mode);
                                                             const defaultRatio = getPreferredModelRatio(defaultModel, mode);
                                                             const defaultResolution = mode === 'image'
                                                                 ? getPreferredImageResolutionForModel(defaultModel)
@@ -31732,7 +31996,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 e.stopPropagation();
                                                                 const newShots = [...(node.settings.shots || [])];
                                                                 const mode = normalizeStoryboardMode(node.settings?.mode);
-                                                                const defaultModel = getFirstEnabledModelKey(mode);
+                                                                const defaultModel = getStoryboardDefaultModelKey(mode);
                                                                 const defaultRatio = getPreferredModelRatio(defaultModel, mode);
                                                                 const defaultResolution = mode === 'image'
                                                                     ? getPreferredImageResolutionForModel(defaultModel)
@@ -32123,7 +32387,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                                             : theme === 'dark' ? 'text-zinc-400 hover:text-zinc-300' : theme === 'solarized' ? 'text-zinc-600 hover:text-zinc-700' : 'text-zinc-600 hover:text-zinc-800'
                                                                                                             }`}
                                                                                                     >
-                                                                                                        {group.name || providerKey}
+                                                                                                        {getSettingsProviderDisplayName(providerKey, group.name)}
                                                                                                     </button>
                                                                                                 ));
                                                                                         })()}
@@ -34025,8 +34289,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         );
                                     })()}
                                     <div
-                                        className={`mt-auto pt-2 flex items-center justify-between shrink-0 relative gap-2 border-t ${theme === 'dark' ? 'border-zinc-800/50' : 'border-zinc-200'
-                                            }`}
+                                        className={`mt-auto sticky bottom-0 z-20 pt-2 flex items-center justify-between shrink-0 relative gap-2 border-t ${theme === 'dark' ? 'border-zinc-800/50 bg-zinc-900/95' : theme === 'solarized' ? 'border-[#d7cfb2] bg-[#fdf6e3]/95' : 'border-zinc-200 bg-zinc-100/95'
+                                            } backdrop-blur`}
                                     >
                                         <div className="relative flex-1 min-w-0">
                                             <button
@@ -36420,7 +36684,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 {/* Provider 列表 */}
                                                 <div className={`w-24 border-r pr-1 max-h-64 overflow-y-auto custom-scrollbar flex flex-col ${theme === 'dark' ? 'border-zinc-700' : 'border-zinc-200'}`}>
                                                     {Object.entries(groupedApiConfigs)
-                                                        .filter(([, group]) => group.models.some(isChatPanelSelectableModel))
+                                                        .filter(([providerKey, group]) => isSettingsProviderVisible(providerKey) && getSettingsProviderModels(providerKey, group.models).some(isChatPanelSelectableModel))
                                                         .map(([providerKey, group]) => (
                                                             <button
                                                                 key={providerKey}
@@ -36429,13 +36693,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     ? theme === 'dark' ? 'bg-zinc-800 text-white' : theme === 'solarized' ? 'bg-[#fdf6e3] text-zinc-800' : 'bg-zinc-100 text-zinc-900'
                                                                     : theme === 'dark' ? 'text-zinc-400 hover:text-zinc-300' : theme === 'solarized' ? 'text-zinc-600 hover:text-zinc-700' : 'text-zinc-600 hover:text-zinc-800'}`}
                                                             >
-                                                                {group.name || providerKey}
+                                                                {getSettingsProviderDisplayName(providerKey, group.name)}
                                                             </button>
                                                         ))}
                                                 </div>
                                                 {/* Model 列表 */}
                                                 <div className="flex-1 pl-1 max-h-64 overflow-y-auto custom-scrollbar">
-                                                    {chatHoveredProvider && groupedApiConfigs[chatHoveredProvider]?.models
+                                                    {chatHoveredProvider && getSettingsProviderModels(chatHoveredProvider, groupedApiConfigs[chatHoveredProvider]?.models)
                                                         .filter(isChatPanelSelectableModel)
                                                         .map((m) => {
                                                             const modelKey = m._uid || m.id;
@@ -37551,16 +37815,26 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         <div className="px-3 pb-3 pt-2 space-y-4">
                                             <div className="space-y-2">
                                                 <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('全局 API Key（可选，全局默认 Key）')}</label>
-                                                <input
-                                                    type="password"
-                                                    value={globalApiKey}
-                                                    onChange={(e) => setGlobalApiKey(e.target.value)}
-                                                    className={`w-full rounded px-2 py-1 text-xs outline-none focus:border-blue-600/50 border ${theme === 'dark'
-                                                        ? 'bg-zinc-900 border-zinc-800 text-zinc-300'
-                                                        : 'bg-white border-zinc-300 text-zinc-900'
-                                                        }`}
-                                                    placeholder={t('如果不想每个模型单独填 Key，可以在这里填一个全局 Key')}
-                                                />
+                                                <div className="relative">
+                                                    <input
+                                                        type={visibleApiKeys.global ? 'text' : 'password'}
+                                                        value={globalApiKey}
+                                                        onChange={(e) => setGlobalApiKey(e.target.value)}
+                                                        className={`w-full rounded px-2 py-1 pr-8 text-xs outline-none focus:border-blue-600/50 border ${theme === 'dark'
+                                                            ? 'bg-zinc-900 border-zinc-800 text-zinc-300'
+                                                            : 'bg-white border-zinc-300 text-zinc-900'
+                                                            }`}
+                                                        placeholder={t('如果不想每个模型单独填 Key，可以在这里填一个全局 Key')}
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleApiKeyVisibility('global')}
+                                                        className={`absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-200' : 'text-zinc-500 hover:text-zinc-800'}`}
+                                                        title={visibleApiKeys.global ? t('隐藏 API Key') : t('显示 API Key')}
+                                                    >
+                                                        {visibleApiKeys.global ? <EyeOff size={14} /> : <Eye size={14} />}
+                                                    </button>
+                                                </div>
                                             </div>
 
                                             <div className="border-t pt-3 border-zinc-700/50">
@@ -37935,7 +38209,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             const hasExpanded = Object.values(expandedProviders).some(v => v);
                                             const newExpanded = {};
                                             if (!hasExpanded) {
-                                                Object.keys(groupedApiConfigs).forEach(key => newExpanded[key] = true);
+                                                Object.keys(groupedApiConfigs)
+                                                    .filter(isSettingsProviderVisible)
+                                                    .forEach(key => newExpanded[key] = true);
                                             }
                                             setExpandedProviders(newExpanded);
                                         }}
@@ -37944,19 +38220,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     >
                                         <ChevronsUp size={14} className={`transition-transform ${!Object.values(expandedProviders).some(v => v) ? 'rotate-180' : ''}`} />
                                     </button>
-                                    <Button className="h-7 text-xs px-3 bg-blue-600 hover:bg-blue-500" onClick={() => {
-                                        // V3.4.7: 添加供应商 - 自动创建并进入编辑模式
-                                        const newKey = `custom-${Date.now()}`;
-                                        const newName = 'New Provider';
-                                        setProviders(prev => ({ ...prev, [newKey]: normalizeProviderConfig(newKey, { key: '', url: '', enabled: true }) }));
-                                        setExpandedProviders(prev => ({ ...prev, [newKey]: true }));
-                                        setEditingProvider({ key: newKey, tempName: newName });
-                                    }}><Plus size={14} className="mr-1" /> {t('添加供应商')}</Button>
+                                    <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'}`}>{t('仅显示 tokenhub 与 tencent-vod')}</span>
                                 </div>
                             </div>
                                     <div className="space-y-2 max-h-[50vh] overflow-y-auto custom-scrollbar pr-1">
                                         {/* V3.4.7: 按 Provider 分组显示模型 */}
-                                        {Object.entries(groupedApiConfigs).map(([providerKey, group]) => (
+                                        {Object.entries(groupedApiConfigs).filter(([providerKey]) => isSettingsProviderVisible(providerKey)).map(([providerKey, group]) => (
                                             <div key={providerKey} className={`group rounded-lg border ${theme === 'dark'
                                                 ? 'bg-[#18181b] border-zinc-800'
                                                 : theme === 'solarized'
@@ -38041,18 +38310,18 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 className={`text-sm font-semibold bg-transparent border-b border-blue-500 outline-none w-full ${theme === 'dark' ? 'text-zinc-100' : 'text-zinc-800'}`}
                                                             />
                                                         ) : (
-                                                            <span className={`text-sm font-semibold ${theme === 'dark' ? 'text-zinc-100' : 'text-zinc-800'}`}>{group.name}</span>
+                                                            <span className={`text-sm font-semibold ${theme === 'dark' ? 'text-zinc-100' : 'text-zinc-800'}`}>{getSettingsProviderDisplayName(providerKey, group.name)}</span>
                                                         )}
                                                         <span className={`text-[10px] px-1.5 py-0.5 rounded ${theme === 'dark'
                                                             ? 'bg-zinc-800 text-zinc-500'
                                                             : theme === 'solarized'
                                                                 ? 'bg-[#eee8d5] text-zinc-600'
                                                                 : 'bg-zinc-200 text-zinc-500'}`}>
-                                                            {group.models.length} 模型
+                                                            {getSettingsProviderModels(providerKey, group.models).length} 模型
                                                         </span>
                                                     </div>
                                                     <div className="flex items-center gap-2">
-                                                        {!editingProvider && (
+                                                        {!editingProvider && !isSettingsProviderFixed(providerKey) && (
                                                             <>
                                                                 <button
                                                                     onClick={(e) => {
@@ -38090,7 +38359,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     <div className="grid grid-cols-4 items-center gap-2">
                                                         <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('接口类型')}</label>
                                                         <select
-                                                            value={(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? 'tencent-vod' : (providers[providerKey]?.apiType || 'openai')}
+                                                            value={(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? 'tencent-vod' : 'openai'}
                                                             onChange={(e) => {
                                                                 if (providerKey === TENCENT_VOD_PROVIDER_KEY) return;
                                                                 setProviders(prev => ({ ...prev, [providerKey]: normalizeProviderConfig(providerKey, { ...prev[providerKey], apiType: e.target.value }) }));
@@ -38098,9 +38367,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             disabled={providerKey === TENCENT_VOD_PROVIDER_KEY}
                                                             className={`col-span-3 w-full rounded px-2 py-1 text-xs outline-none focus:border-blue-600/50 border ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'} ${providerKey === TENCENT_VOD_PROVIDER_KEY ? 'opacity-70 cursor-not-allowed' : ''}`}
                                                         >
-                                                            <option value="openai">OpenAI</option>
-                                                            <option value="gemini">Gemini</option>
-                                                            <option value="modelscope">ModelScope</option>
+                                                            <option value="openai">openai</option>
                                                             <option value="tencent-vod">Tencent VOD</option>
                                                         </select>
                                                     </div>
@@ -38153,18 +38420,28 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             : 'bg-zinc-300'
                                                                     } peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all`}></div>
                                                             </label>
-                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? 'VOD AIGC 固定异步任务' : t('ModelScope 建议开启')}</span>
+                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? 'VOD AIGC 固定异步任务' : t('TokenHub 通常无需开启')}</span>
                                                         </div>
                                                     </div>
                                                     <div className="grid grid-cols-4 items-center gap-2">
                                                         <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>API Key</label>
-                                                        <input
-                                                            type="password"
-                                                            value={providers[providerKey]?.key || ''}
-                                                            onChange={(e) => setProviders(prev => ({ ...prev, [providerKey]: { ...prev[providerKey], key: e.target.value } }))}
-                                                            className={`col-span-3 w-full rounded px-2 py-1 text-xs outline-none focus:border-blue-600/50 border ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'}`}
-                                                            placeholder={(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? 'SecretId|SecretKey|SubAppId|Region' : 'sk-...'}
-                                                        />
+                                                        <div className="col-span-3 relative">
+                                                            <input
+                                                                type={visibleApiKeys[providerKey] ? 'text' : 'password'}
+                                                                value={providers[providerKey]?.key || ''}
+                                                                onChange={(e) => setProviders(prev => ({ ...prev, [providerKey]: { ...prev[providerKey], key: e.target.value } }))}
+                                                                className={`w-full rounded px-2 py-1 pr-8 text-xs outline-none focus:border-blue-600/50 border ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'}`}
+                                                                placeholder={(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? 'SecretId|SecretKey|SubAppId|Region' : 'sk-...'}
+                                                            />
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => toggleApiKeyVisibility(providerKey)}
+                                                                className={`absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-200' : 'text-zinc-500 hover:text-zinc-800'}`}
+                                                                title={visibleApiKeys[providerKey] ? t('隐藏 API Key') : t('显示 API Key')}
+                                                            >
+                                                                {visibleApiKeys[providerKey] ? <EyeOff size={14} /> : <Eye size={14} />}
+                                                            </button>
+                                                        </div>
                                                     </div>
                                                     <div className="grid grid-cols-4 items-center gap-2">
                                                         <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>Base URL</label>
@@ -38243,33 +38520,10 @@ ${inputText.substring(0, 15000)} ... (截断)
 
                                                     <div className="flex items-center justify-between mb-2">
                                                         <div className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('模型')}</div>
-                                                        <div className="flex items-center gap-2">
-                                                            <button
-                                                                onClick={() => importApiModelConfigs(providerKey)}
-                                                                className={`text-[9px] px-1.5 py-0.5 rounded flex items-center gap-1 ${theme === 'dark' ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700' : 'bg-zinc-200 text-zinc-600 hover:bg-zinc-300'}`}
-                                                            >
-                                                                <UploadCloud size={10} /> {t('导入模型')}
-                                                            </button>
-                                                            <button
-                                                                onClick={() => {
-                                                                    const newId = `${providerKey}-${Date.now()}`;
-                                                                    const uid = `uid-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-                                                                    setApiConfigs(prev => [...prev, {
-                                                                        id: newId,
-                                                                        provider: providerKey,
-                                                                        type: 'Chat',
-                                                                        _uid: uid
-                                                                    }]);
-                                                                    setApiModelEditing(uid, true);
-                                                                }}
-                                                                className={`text-[9px] px-1.5 py-0.5 rounded flex items-center gap-1 ${theme === 'dark' ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700' : 'bg-zinc-200 text-zinc-600 hover:bg-zinc-300'}`}
-                                                            >
-                                                                <Plus size={10} /> {t('添加模型')}
-                                                            </button>
-                                                        </div>
+                                                        <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'}`}>{providerKey === TOKENHUB_PROVIDER_KEY ? '默认模型：hy3-preview' : '仅显示 VOD AIGC 模型'}</div>
                                                     </div>
                                                     <div className="space-y-1.5">
-                                                        {group.models.map(api => {
+                                                        {getSettingsProviderModels(providerKey, group.models).map(api => {
                                                             const isEditing = editingApiModels.has(api._uid);
                                                             const vodConfigType = getVodConfigType(api);
                                                             const vodSelection = vodConfigType ? getVodSelectionFromCustomParams(vodConfigType, api.customParams) : null;
@@ -38347,9 +38601,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 disabled={!isEditing || !!api.libraryId}
                                                                             >
                                                                                 <option value="">{t('跟随 Provider')}</option>
-                                                                                <option value="openai">OpenAI</option>
-                                                                                <option value="gemini">Gemini</option>
-                                                                                <option value="modelscope">ModelScope</option>
+                                                                                <option value="openai">openai</option>
+                                                                                <option value="tencent-vod">Tencent VOD</option>
                                                                             </select>
                                                                         </div>
                                                                         <div className="flex items-center gap-1">
@@ -38794,9 +39047,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'}`}
                                                                         disabled={!isEditing}
                                                                     >
-                                                                        <option value="openai">OpenAI</option>
-                                                                        <option value="gemini">Gemini</option>
-                                                                        <option value="modelscope">ModelScope</option>
+                                                                        <option value="openai">openai</option>
+                                                                        <option value="tencent-vod">Tencent VOD</option>
                                                                     </select>
                                                                 </div>
                                                             </div>

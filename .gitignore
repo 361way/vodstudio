@@ -2,6 +2,7 @@
 node_modules/
 training/
 vodstudio-cache/
+cloudbaserc.json
 
 # Sensitive SSH/private key files
 id_rsa*

@@ -24,10 +24,10 @@ export const VOD_VIDEO_MODEL_ID = 'vod-aigc-video';
 export const VOD_API_VERSION = '2018-07-17';
 export const VOD_API_HOST = 'vod.tencentcloudapi.com';
 export const VOD_SERVICE = 'vod';
-export const VOD_DEFAULT_IMAGE_MODEL_NAME = 'GG';
-export const VOD_DEFAULT_IMAGE_MODEL_VERSION = '2.5';
-export const VOD_DEFAULT_VIDEO_MODEL_NAME = 'GV';
-export const VOD_DEFAULT_VIDEO_MODEL_VERSION = '3.1-fast';
+export const VOD_DEFAULT_IMAGE_MODEL_NAME = 'Kling';
+export const VOD_DEFAULT_IMAGE_MODEL_VERSION = '3.0';
+export const VOD_DEFAULT_VIDEO_MODEL_NAME = 'Kling';
+export const VOD_DEFAULT_VIDEO_MODEL_VERSION = '3.0';
 
 // ModelName / ModelVersion 支持矩阵（来自官方文档 2026-05）
 export const VOD_IMAGE_MODEL_MATRIX = {
@@ -215,7 +215,9 @@ function wrapProxy(targetUrl, { useProxy, localServerUrl }) {
     if (!useProxy) return targetUrl;
     const base = String(localServerUrl || '').trim().replace(/\/+$/, '');
     if (!base) return targetUrl;
-    return `${base}/proxy?url=${encodeURIComponent(targetUrl)}`;
+    const target = String(targetUrl || '');
+    if (target.startsWith(`${base}/file/`) || target.startsWith(`${base}/proxy?`)) return target;
+    return `${base}/proxy?url=${encodeURIComponent(target)}`;
 }
 
 function arrayBufferToBase64(buffer) {
@@ -227,6 +229,15 @@ function arrayBufferToBase64(buffer) {
         binary += String.fromCharCode.apply(null, chunk);
     }
     return btoa(binary);
+}
+
+function base64ToBlob(base64, mime = 'application/octet-stream') {
+    const binary = atob(base64 || '');
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: mime });
 }
 
 // ============================================================================
@@ -272,6 +283,7 @@ async function callVodApi(action, body, ctx) {
                     httpMethod: 'POST',
                     path: '/proxy',
                     queryString: { url: directUrl },
+                    url: directUrl,
                     headers: fetchHeaders,
                     body: payload
                 }
@@ -348,6 +360,28 @@ async function resolveBlob(input, ctx = {}) {
     if (typeof input === 'string') {
         // data: URL 或普通 URL
         const isHttpUrl = /^https?:\/\//i.test(input);
+        if (isHttpUrl && ctx.tcb) {
+            const proxyResult = await ctx.tcb.callFunction({
+                name: 'vodstudio-proxy',
+                data: {
+                    httpMethod: 'GET',
+                    path: '/proxy',
+                    queryString: { url: input },
+                    url: input,
+                    headers: {},
+                    body: ''
+                }
+            });
+            const { statusCode, headers = {}, body = '', isBase64Encoded } = proxyResult.result || {};
+            if (!(statusCode >= 200 && statusCode < 300)) {
+                const text = isBase64Encoded ? atob(body || '') : (body || '');
+                throw new Error(`[VOD Upload] 获取图片失败: ${statusCode || 500} ${text.slice(0, 160)}`);
+            }
+            const mime = headers['content-type'] || headers['Content-Type'] || 'image/png';
+            const blob = isBase64Encoded ? base64ToBlob(body, mime) : new Blob([body], { type: mime });
+            const ext = mimeToExt(mime);
+            return { blob, mime, ext };
+        }
         const targetUrl = isHttpUrl ? wrapProxy(input, ctx) : input;
         const resp = await fetch(targetUrl);
         if (!resp.ok) throw new Error(`[VOD Upload] 获取图片失败: ${resp.status}`);
@@ -415,6 +449,7 @@ async function putObjectToCos({ tempCred, bucket, region, key, blob }, ctx = {})
                     httpMethod: 'PUT',
                     path: '/cos-put',
                     queryString: { url: `https://${host}${encodedKey}` },
+                    url: `https://${host}${encodedKey}`,
                     headers: {
                         Authorization: authorization,
                         'x-cos-security-token': tempCred.Token

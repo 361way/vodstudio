@@ -4,7 +4,7 @@ exports.main = async (event, context) => {
     const method = (event.httpMethod || 'GET').toUpperCase();
     const rawPath = event.path || '/';
     const headers = event.headers || {};
-    const query = event.queryString || {};
+    const query = event.queryString || event.queryStringParameters || event.query || {};
     const body = event.body || '';
     const isBodyBase64 = !!event.isBase64Encoded;
 
@@ -39,9 +39,9 @@ exports.main = async (event, context) => {
 
         // /proxy?url=<target>
         if (pathname === '/proxy') {
-            const target = query.url || '';
+            const target = query.url || event.url || event.targetUrl || '';
             if (!target) {
-                return jsonResp(400, corsHeaders, { error: 'Missing ?url= parameter' });
+                return jsonResp(400, corsHeaders, { error: 'Missing url parameter' });
             }
             return await handleProxy(target, method, headers, body, corsHeaders);
         }
@@ -66,7 +66,7 @@ exports.main = async (event, context) => {
 
         // /cos-put - 代理 COS PUT Object 请求（解决浏览器 CORS 问题）
         if (pathname === '/cos-put') {
-            const targetUrl = query.url || '';
+            const targetUrl = query.url || event.url || event.targetUrl || '';
             if (!targetUrl) {
                 return jsonResp(400, corsHeaders, { error: 'Missing url parameter' });
             }
@@ -95,7 +95,12 @@ async function handleProxy(target, method, headers, body, corsHeaders) {
     } catch {
         return jsonResp(400, corsHeaders, { error: 'Invalid target URL' });
     }
-    if (targetUrl.protocol !== 'https:' || targetUrl.hostname !== 'vod.tencentcloudapi.com') {
+    const isVodApiTarget = targetUrl.protocol === 'https:' && targetUrl.hostname === 'vod.tencentcloudapi.com';
+    const isVodMediaTarget = ['GET', 'HEAD'].includes(method)
+        && /^https?:$/.test(targetUrl.protocol)
+        && /(^|\.)vod2\.myqcloud\.com$/i.test(targetUrl.hostname);
+    const isTokenHubTarget = targetUrl.protocol === 'https:' && targetUrl.hostname === 'tokenhub.tencentmaas.com';
+    if (!isVodApiTarget && !isVodMediaTarget && !isTokenHubTarget) {
         return jsonResp(403, corsHeaders, { error: 'Forbidden target URL' });
     }
 
