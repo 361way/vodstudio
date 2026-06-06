@@ -197,17 +197,32 @@ Golang代理主要解决VOD服务安全问题，DeepSeek 能直连，是因为�
 
 <br>
 
-## CloudBase 部署信息（已弃用 / 仅作历史参考）
+## CloudBase 部署信息
 
-> 自当前版本起，前端运行时已**完全解耦 CloudBase**：不再引入 `@cloudbase/js-sdk`，所有 VOD / TokenHub / COS 调用统一改走本地/可配置 CORS 转发代理（默认 `http://127.0.0.1:9527`）。源码中此前硬编码并泄露的 CloudBase `accessKey` 已删除。`cloudbaserc.json` 与 `functions/` 目录暂保留，仅供需要自行部署的用户参考，前端已不再调用其中的云函数。
+> 项目通过 CloudBase 静态托管提供在线访问，云函数 `vodstudio-proxy` 作为 VOD / TokenHub / COS 的 CORS 代理。
 
-历史部署信息（保留备查）：
+### 最新部署 (2026-06-06)
 
-- 环境 ID：`test234-d0g5z9qyae01763f6`（地域：`ap-shanghai`）
-- 云函数：`vodstudio-proxy`，事件函数形态，旧版本通过 Web SDK `callFunction` 调用（现已不再使用）。
-- 历史部署命令：
+| 资源 | 详情 |
+|------|------|
+| 环境 ID | `test234-d0g5z9qyae01763f6`（地域：`ap-shanghai`） |
+| 前端地址 | `https://test234-d0g5z9qyae01763f6-1305660054.tcloudbaseapp.com/` |
+| 云函数 | `vodstudio-proxy`（Node.js 16.13, 256MB, 30s） |
+| 云函数地址 | `https://test234-d0g5z9qyae01763f6.service.tcloudbase.com/vodstudio-proxy` |
+
+### 部署命令
 
 ```bash
+# 1. 构建
 npm run build
+
+# 2. 部署云函数（代码更新）
+#    通过 CloudBase 工具或 MCP: createFunction / updateFunctionCode
+
+# 3. 部署静态网站
 tcb hosting deploy dist/ -e test234-d0g5z9qyae01763f6 --yes
 ```
+
+### 历史备注
+
+> 前端运行时已解耦 `@cloudbase/js-sdk`，VOD / TokenHub / COS 调用走本地代理 `http://127.0.0.1:9527`（或上述云函数地址）。
