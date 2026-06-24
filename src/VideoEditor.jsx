@@ -21,9 +21,9 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom';
 import {
     X, Scissors, Music, Type as TypeIcon, Film, Play, Pause, Download,
-    Trash2, GripVertical, Loader2, Wand2, ChevronDown
+    Trash2, GripVertical, Loader2, Wand2, ChevronDown, Subtitles, ToggleLeft, ToggleRight
 } from 'lucide-react';
-import { VOD_TRANSITION_TYPES } from './vodAdapter';
+import { VOD_TRANSITION_TYPES, ASR_FULLTEXT_TEMPLATES, runAsrFullTextPipeline } from './vodAdapter';
 
 const ASPECT_PRESETS = [
     { id: '16:9', label: '16:9 横屏', width: 1920, height: 1080 },
@@ -54,7 +54,8 @@ export default function VideoEditor({
     t = (s) => s,
     initialClips = [],
     canvasSize = null,
-    onCompose
+    onCompose,
+    vodCtx = null   // { credentials, useProxy, localServerUrl } 用于调用 VOD API（字幕识别等）
 }) {
     const isDark = theme === 'dark';
     const isSolarized = theme === 'solarized';
@@ -106,6 +107,14 @@ export default function VideoEditor({
     const [stageText, setStageText] = useState('');
     const [resultUrl, setResultUrl] = useState('');
     const [errorText, setErrorText] = useState('');
+
+    // ---- 字幕（ASR 语音全文识别）----
+    const [subtitleEnabled, setSubtitleEnabled] = useState(false);        // 字幕开关
+    const [subtitleLang, setSubtitleLang] = useState(111);                // 模板 ID: 111中文 112英文 113日文
+    const [subtitleLoading, setSubtitleLoading] = useState(false);        // 识别中
+    const [subtitleUrl, setSubtitleUrl] = useState('');                   // VTT 字幕文件 URL
+    const [subtitleError, setSubtitleError] = useState('');               // 错误信息
+    const [subtitleProgress, setSubtitleProgress] = useState('');         // 识别进度文字
 
     // 预览播放器
     const previewRef = useRef(null);
@@ -233,6 +242,55 @@ export default function VideoEditor({
             setIsPlaying(false);
         }
     };
+
+    // ---- 字幕 track 自动激活 ----
+    useEffect(() => {
+        const v = previewRef.current;
+        if (!v) return;
+        // 延迟确保 track 元素已挂载
+        const timer = setTimeout(() => {
+            const tracks = v.textTracks;
+            if (tracks && tracks.length > 0) {
+                for (let i = 0; i < tracks.length; i++) {
+                    tracks[i].mode = (subtitleEnabled && subtitleUrl) ? 'showing' : 'hidden';
+                }
+            }
+        }, 200);
+        return () => clearTimeout(timer);
+    }, [subtitleEnabled, subtitleUrl, selectedId]);
+
+    // ---- 字幕识别调用 ----
+    const handleSubtitleRecognize = useCallback(async () => {
+        if (!selectedClip) return;
+        if (!vodCtx?.credentials) {
+            setSubtitleError('未配置 VOD 凭据，无法进行语音识别');
+            return;
+        }
+        // 需要 FileId —— 从 clip 的 srcUrl 或 fileId 字段获取
+        const fileId = selectedClip.fileId || selectedClip.vodFileId;
+        if (!fileId) {
+            setSubtitleError('当前片段无 FileId，请先将视频上传至 VOD');
+            return;
+        }
+        setSubtitleLoading(true);
+        setSubtitleError('');
+        setSubtitleUrl('');
+        setSubtitleProgress('提交识别任务…');
+        try {
+            const result = await runAsrFullTextPipeline(fileId, subtitleLang, vodCtx, {
+                onProgress: (attempt, status) => {
+                    setSubtitleProgress(`识别中… (${status || '轮询'} #${attempt + 1})`);
+                }
+            });
+            setSubtitleUrl(result.subtitleUrl);
+            setSubtitleProgress('识别完成');
+        } catch (err) {
+            setSubtitleError(err?.message || String(err));
+            setSubtitleProgress('');
+        } finally {
+            setSubtitleLoading(false);
+        }
+    }, [selectedClip, vodCtx, subtitleLang]);
 
     // 把当前预览时间设为 in / out
     const setInFromPreview = () => {
@@ -388,10 +446,22 @@ export default function VideoEditor({
                                     src={selectedClip.srcUrl}
                                     className="max-w-full max-h-full rounded"
                                     playsInline
+                                    crossOrigin="anonymous"
                                     onLoadedMetadata={(e) => onMetaLoaded(selectedClip.id, e.currentTarget.duration)}
                                     onPlay={() => setIsPlaying(true)}
                                     onPause={() => setIsPlaying(false)}
-                                />
+                                >
+                                    {/* 智能字幕 VTT track */}
+                                    {subtitleEnabled && subtitleUrl && (
+                                        <track
+                                            kind="subtitles"
+                                            src={subtitleUrl}
+                                            srcLang={ASR_FULLTEXT_TEMPLATES.find(t => t.id === subtitleLang)?.lang || 'zh'}
+                                            label={ASR_FULLTEXT_TEMPLATES.find(t => t.id === subtitleLang)?.label || '中文'}
+                                            default
+                                        />
+                                    )}
+                                </video>
                             ) : (
                                 <div className="text-zinc-500 text-sm">{t('没有片段可预览')}</div>
                             )}
@@ -502,6 +572,77 @@ export default function VideoEditor({
                                             />
                                         ))}
                                     </div>
+                                </div>
+
+                                {/* 智能字幕（语音全文识别）*/}
+                                <div className="space-y-2">
+                                    <div className="text-xs font-semibold flex items-center gap-1.5">
+                                        <Subtitles size={13} /> {t('智能字幕')}
+                                    </div>
+                                    {/* 启用/关闭开关 */}
+                                    <div className="flex items-center justify-between">
+                                        <span className={`text-[11px] ${ui.mutedText}`}>{t('语音全文识别')}</span>
+                                        <button
+                                            onClick={() => {
+                                                setSubtitleEnabled(!subtitleEnabled);
+                                                if (subtitleEnabled) {
+                                                    setSubtitleUrl('');
+                                                    setSubtitleError('');
+                                                    setSubtitleProgress('');
+                                                }
+                                            }}
+                                            className="flex items-center"
+                                            title={subtitleEnabled ? t('关闭字幕') : t('启用字幕')}
+                                        >
+                                            {subtitleEnabled
+                                                ? <ToggleRight size={22} className="text-blue-500" />
+                                                : <ToggleLeft size={22} className={ui.mutedText} />
+                                            }
+                                        </button>
+                                    </div>
+
+                                    {subtitleEnabled && (
+                                        <>
+                                            {/* 语言选择 */}
+                                            <div className="flex items-center gap-2">
+                                                <span className={`text-[11px] shrink-0 ${ui.mutedText}`}>{t('识别语言')}</span>
+                                                <select
+                                                    value={subtitleLang}
+                                                    onChange={(e) => setSubtitleLang(Number(e.target.value))}
+                                                    className={`flex-1 text-xs rounded border px-2 py-1 outline-none ${ui.input}`}
+                                                >
+                                                    {ASR_FULLTEXT_TEMPLATES.map((tpl) => (
+                                                        <option key={tpl.id} value={tpl.id}>{tpl.label}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+
+                                            {/* 发起识别按钮 */}
+                                            <button
+                                                onClick={handleSubtitleRecognize}
+                                                disabled={subtitleLoading}
+                                                className="w-full flex items-center justify-center gap-1.5 text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium"
+                                            >
+                                                {subtitleLoading
+                                                    ? <><Loader2 size={12} className="animate-spin" /> {t('识别中…')}</>
+                                                    : <><Subtitles size={12} /> {t('开始识别字幕')}</>
+                                                }
+                                            </button>
+
+                                            {/* 进度/状态 */}
+                                            {subtitleProgress && (
+                                                <div className={`text-[11px] ${ui.mutedText}`}>{subtitleProgress}</div>
+                                            )}
+                                            {subtitleError && (
+                                                <div className="text-[11px] text-red-500">{subtitleError}</div>
+                                            )}
+                                            {subtitleUrl && (
+                                                <div className="text-[11px] text-green-500 break-all">
+                                                    ✅ {t('字幕已加载')}
+                                                </div>
+                                            )}
+                                        </>
+                                    )}
                                 </div>
                             </div>
                         ) : (

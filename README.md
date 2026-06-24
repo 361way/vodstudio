@@ -197,17 +197,62 @@ Golang代理主要解决VOD服务安全问题，DeepSeek 能直连，是因为�
 
 <br>
 
-## CloudBase 部署信息（已弃用 / 仅作历史参考）
+## CloudBase 部署信息
 
-> 自当前版本起，前端运行时已**完全解耦 CloudBase**：不再引入 `@cloudbase/js-sdk`，所有 VOD / TokenHub / COS 调用统一改走本地/可配置 CORS 转发代理（默认 `http://127.0.0.1:9527`）。源码中此前硬编码并泄露的 CloudBase `accessKey` 已删除。`cloudbaserc.json` 与 `functions/` 目录暂保留，仅供需要自行部署的用户参考，前端已不再调用其中的云函数。
+> 当前部署形态：**前端静态托管 + 容器型云托管 (CloudRun) Go 代理**。Go 代理来自本地 `proxy-server.go`，编译为 Docker 镜像部署到 CloudRun，前端直接通过 CloudRun 路径访问代理服务，无需本地启动任何服务。
 
-历史部署信息（保留备查）：
+### 当前部署快照
 
 - 环境 ID：`test234-d0g5z9qyae01763f6`（地域：`ap-shanghai`）
-- 云函数：`vodstudio-proxy`，事件函数形态，旧版本通过 Web SDK `callFunction` 调用（现已不再使用）。
-- 历史部署命令：
+- **后端代理**：CloudRun **容器型**服务 `vodstudio-proxy`（CPU 0.5 / Mem 1G / MinNum 1）
+  - 路径访问（前端默认值）：`https://test234-d0g5z9qyae01763f6.service.tcloudbase.com/vodstudio-proxy/`
+  - 子域访问（备用）：`https://vodstudio-proxy-257975-7-1305660054.sh.run.tcloudbase.com`
+  - 技术栈：Go 1.21（零外部依赖，纯标准库 HTTP 代理）
+  - 源码：`cloudrun/vodstudio-proxy/main.go`（基于 `proxy-server.go` 适配 CloudRun）
+  - 路由：`/ping`、`/config`、`/proxy?url=`、`/cos-put?url=`、`/save-cache`、`/file/<rel>`、`/list-files`
+- **前端**：CloudBase **静态网站托管**
+  - 访问入口：`https://test234-d0g5z9qyae01763f6-1305660054.tcloudbaseapp.com/?v=20260609`
+  - 部署方式：`vite build` 产出单文件 `dist/index.html`（~1.4 MB / gzip ~400 KB）
+
+### 架构流程
+
+```
+浏览器 → tcloudbaseapp.com (静态托管)
+         ↓ proxy 请求
+       service.tcloudbase.com/vodstudio-proxy (CloudRun Go 代理)
+         ↓ CORS 转发
+       VOD API / TokenHub / COS 等上游服务
+```
+
+### 再次发布命令
 
 ```bash
+# 1. 部署 / 更新 CloudRun Go 代理
+#    源码位置：cloudrun/vodstudio-proxy/
+#    （main.go + go.mod + Dockerfile，多阶段构建，最终镜像约 15MB）
+#    在 IDE 中通过 CloudBase integration 的 manageCloudRun deploy 完成
+
+# 2. 构建前端
 npm run build
-tcb hosting deploy dist/ -e test234-d0g5z9qyae01763f6 --yes
+
+# 3. 上传 dist 到静态托管
+#    通过 IDE CloudBase integration → uploadFiles，或：
+#    tcb hosting deploy dist/ -e test234-d0g5z9qyae01763f6 --yes
 ```
+
+### 本地开发
+
+```bash
+# 本地代理直接用 Go（推荐）
+go run proxy-server.go
+# 监听 http://127.0.0.1:9527，前端自动识别本地环境使用此地址
+
+# 或使用 Node.js 代理（不推荐，会全局代理影响上网）
+# node proxy-server.mjs
+```
+
+### 代理地址优先级
+
+1. provider 设置里的 **代理地址（proxyUrl）** —— 仅对该模型接口生效
+2. 全局**本地服务地址（localServerUrl）**
+3. 默认值：浏览器域名命中 `tcloudbaseapp.com` / `txcloud.vip` 时使用 CloudRun，其余情况使用 `http://127.0.0.1:9527`

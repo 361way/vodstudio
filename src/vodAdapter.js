@@ -798,14 +798,22 @@ export function resolveVodSubModel(type, customParamSelections, customParams = [
     };
 
     let modelName = pickSelection(['ModelName', 'modelName'], ['vod-model-name']) || defaultModelName;
-    if (!matrix[modelName]) modelName = defaultModelName;
-    const versions = matrix[modelName] || [];
-    const modelVersion = pickSelection(['ModelVersion', 'modelVersion'], ['vod-model-version']);
-    const fallbackVersion = versions.includes(defaultModelVersion) ? defaultModelVersion : versions[0] || '';
-    return {
-        modelName,
-        modelVersion: modelVersion && versions.includes(modelVersion) ? modelVersion : fallbackVersion
-    };
+    // 过滤自定义模式占位标记
+    if (modelName === '__custom__') modelName = '';
+    const isCustom = modelName && !matrix[modelName];
+    if (!isCustom) {
+        // 预设模型：版本必须在矩阵范围内
+        const versions = matrix[modelName] || [];
+        const modelVersion = pickSelection(['ModelVersion', 'modelVersion'], ['vod-model-version']);
+        const fallbackVersion = versions.includes(defaultModelVersion) ? defaultModelVersion : versions[0] || '';
+        return {
+            modelName,
+            modelVersion: modelVersion && versions.includes(modelVersion) ? modelVersion : fallbackVersion
+        };
+    }
+    // 自定义模型：直接透传用户输入的 modelName 和 modelVersion
+    const modelVersion = pickSelection(['ModelVersion', 'modelVersion'], ['vod-model-version']) || '';
+    return { modelName, modelVersion };
 }
 
 // ============================================================================
@@ -1126,4 +1134,114 @@ export async function runVodComposePipeline(plan, ctx) {
         throw new Error('[VOD Compose] 合成完成但未返回可用的成片 URL/FileId');
     }
     return { urls, taskId, taskDetail, outputFileIds };
+}
+
+// ============================================================================
+// 智能识别 · 语音全文识别（ASR Full Text Recognition）
+// ----------------------------------------------------------------------------
+// 使用 ProcessMedia 接口发起识别任务，预置模板 ID：
+//   - 111: 中文识别，生成 vtt 字幕
+//   - 112: 英文识别，生成 vtt 字幕
+//   - 113: 日文识别，生成 vtt 字幕
+// 识别完成后从 DescribeTaskDetail 的 AiRecognitionResultSet 中提取字幕 URL。
+// ============================================================================
+
+/** 语音全文识别预置模板 */
+export const ASR_FULLTEXT_TEMPLATES = [
+    { id: 111, label: '中文', lang: 'zh' },
+    { id: 112, label: 'English', lang: 'en' },
+    { id: 113, label: '日本語', lang: 'ja' }
+];
+
+/**
+ * 对已上传到 VOD 的 FileId 发起语音全文识别任务
+ * @param {string} fileId  VOD 媒体文件 ID
+ * @param {number} definition  智能识别模板 ID (111=中文, 112=英文, 113=日文)
+ * @param {Object} ctx  { credentials, useProxy, localServerUrl }
+ * @returns {Promise<{taskId: string}>}
+ */
+export async function processMediaAsrFullText(fileId, definition, ctx) {
+    const body = {
+        FileId: fileId,
+        SubAppId: ctx.credentials.subAppId,
+        AiRecognitionTask: {
+            Definition: definition
+        }
+    };
+    const resp = await callVodApi('ProcessMedia', body, ctx);
+    const taskId = resp.TaskId;
+    if (!taskId) throw new Error('[VOD ASR] ProcessMedia 未返回 TaskId');
+    return { taskId };
+}
+
+/**
+ * 从 DescribeTaskDetail 的响应中提取语音全文识别结果的字幕文件 URL
+ * @param {Object} taskDetail  DescribeTaskDetail 返回的完整响应
+ * @returns {string|null} VTT 字幕文件 URL，未找到则返回 null
+ */
+export function extractAsrSubtitleUrl(taskDetail) {
+    // ProcessMedia 的结果在 AiRecognitionResultSet 中
+    const resultSet = taskDetail?.AiRecognitionResultSet
+        || taskDetail?.AiRecognitionTask?.ResultSet
+        || [];
+    for (const item of resultSet) {
+        if (item.Type === 'AsrFullTextRecognition') {
+            // OutputStorage 中有字幕文件
+            const outputSet = item.SegmentResultSet || item.Output?.SubtitleSet || [];
+            // 尝试从 SubtitlePath / SubtitleUrl 获取
+            if (item.Output?.SubtitleUrl) return item.Output.SubtitleUrl;
+            if (item.OutputStorage?.Path) return item.OutputStorage.Path;
+            // 遍历 SegmentSet / SubtitleSet
+            for (const seg of outputSet) {
+                if (seg.SubtitleUrl) return seg.SubtitleUrl;
+                if (seg.Url) return seg.Url;
+            }
+        }
+    }
+    // 备用：遍历整个 taskDetail 寻找 .vtt URL
+    const walk = (obj) => {
+        if (!obj || typeof obj !== 'object') return null;
+        if (Array.isArray(obj)) {
+            for (const item of obj) {
+                const r = walk(item);
+                if (r) return r;
+            }
+            return null;
+        }
+        for (const [k, v] of Object.entries(obj)) {
+            if (typeof v === 'string' && /\.vtt/i.test(v) && /^https?:\/\//i.test(v)) {
+                return v;
+            }
+            if (typeof v === 'object') {
+                const r = walk(v);
+                if (r) return r;
+            }
+        }
+        return null;
+    };
+    return walk(taskDetail);
+}
+
+/**
+ * 完整流程：发起语音全文识别 → 轮询 → 提取字幕 URL
+ * @param {string} fileId  VOD 媒体文件 ID
+ * @param {number} definition  模板 ID (111/112/113)
+ * @param {Object} ctx
+ * @param {Object} opts  { onProgress(attempt, status) }
+ * @returns {Promise<{subtitleUrl: string, taskId: string, taskDetail: Object}>}
+ */
+export async function runAsrFullTextPipeline(fileId, definition, ctx, opts = {}) {
+    const { taskId } = await processMediaAsrFullText(fileId, definition, ctx);
+
+    const taskDetail = await pollVodTask(taskId, ctx, {
+        pollIntervalMs: 3000,
+        maxAttempts: 200,
+        onProgress: opts.onProgress
+    });
+
+    const subtitleUrl = extractAsrSubtitleUrl(taskDetail);
+    if (!subtitleUrl) {
+        throw new Error('[VOD ASR] 语音全文识别完成但未找到字幕文件 URL');
+    }
+    return { subtitleUrl, taskId, taskDetail };
 }

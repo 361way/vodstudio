@@ -1820,17 +1820,22 @@ const VIDEO_TASK_TIMEOUT_MS = 5 * 60 * 1000;
 
 // --- 默认配置 ---
 const TOKENHUB_BASE_URL = 'https://tokenhub.tencentmaas.com';
-const LEGACY_DEFAULT_BASE_URL = 'https://ai.comfly.chat';
 const LOCAL_PROXY_DEFAULT_URL = 'http://127.0.0.1:9527';
-const CLOUD_FUNCTION_PROXY_LEGACY_URL = 'https://test234-d0g5z9qyae01763f6-1305660054.ap-shanghai.app.tcloudbase.com';
+// 线上部署时默认使用部署在 ubuntu 服务器上的 Go 代理，解决浏览器 CORS 问题
+const CLOUD_FUNCTION_PROXY_URL = 'https://vodstudio.txcloud.vip';
+// 根据当前环境返回合适的默认代理地址
+const getDefaultProxyBase = () => {
+    if (typeof window !== 'undefined' && (window.location.hostname.includes('tcloudbaseapp.com') || window.location.hostname.includes('txcloud.vip'))) {
+        return CLOUD_FUNCTION_PROXY_URL;
+    }
+    return LOCAL_PROXY_DEFAULT_URL;
+};
 const DEFAULT_BASE_URL = TOKENHUB_BASE_URL;
 const DEFAULT_TOKENHUB_MODEL_ID = 'hy3-preview';
 const TOKENHUB_PROVIDER_KEY = 'openai';
 const TENCENT_VOD_BASE_URL = `https://${VOD_API_HOST}`;
 
-// 即梦API配置（代理地址，默认本地5100端口）
-const JIMENG_API_BASE_URL = 'http://localhost:5100';
-const JIMENG_SESSION_ID = '7a16459fbd65d9c87b4ea44d3318f5fa';
+// [已移除] 即梦API配置 - 暂不使用
 
 // V3.6.0: 供应商配置（简化版 - 无 name 字段，直接用 key 作为显示名）
 const DEFAULT_PROVIDERS = {
@@ -1838,7 +1843,7 @@ const DEFAULT_PROVIDERS = {
     'google': { key: '', url: DEFAULT_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
     'deepseek': { key: '', url: DEFAULT_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
     'midjourney': { key: '', url: 'https://api.midjourney.com', apiType: 'openai', useProxy: false, forceAsync: false },
-    'jimeng': { key: '', url: JIMENG_API_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
+
     'grok': { key: '', url: 'https://ai.t8star.cn', apiType: 'openai', useProxy: false, forceAsync: false },
     // 腾讯云 VOD AIGC（key 格式：SecretId|SecretKey|SubAppId|Region；Base URL 为官方域名，请求经 CORS 转发通道发送）
     'tencent-vod': { key: '', url: TENCENT_VOD_BASE_URL, apiType: 'tencent-vod', useProxy: true, forceAsync: true },
@@ -1910,6 +1915,8 @@ const buildVodCustomParams = (type) => {
     ];
 };
 
+const VOD_CUSTOM_MODE_MARKER = '__custom__';
+
 const getVodSelectionFromCustomParams = (type, customParams) => {
     const matrix = getVodMatrixByType(type);
     const modelNames = Object.keys(matrix);
@@ -1919,9 +1926,17 @@ const getVodSelectionFromCustomParams = (type, customParams) => {
         return String(param?.defaultValue || '').trim();
     };
     let modelName = readDefault(['vod-model-name'], ['ModelName', 'modelName']) || getVodDefaultModelNameByType(type);
+    let modelVersion = readDefault(['vod-model-version'], ['ModelVersion', 'modelVersion']) || '';
+    // 自定义模型：使用特殊标记 或 modelName 不在预设列表中
+    const isCustom = modelName === VOD_CUSTOM_MODE_MARKER || (modelName && !modelNames.includes(modelName));
+    if (isCustom) {
+        // 如果是标记值则显示为空让用户输入
+        const displayName = modelName === VOD_CUSTOM_MODE_MARKER ? '' : modelName;
+        return { modelName: displayName, modelVersion, versions: [], isCustom: true };
+    }
     if (!modelNames.includes(modelName)) modelName = modelNames.includes(getVodDefaultModelNameByType(type)) ? getVodDefaultModelNameByType(type) : (modelNames[0] || '');
     const versions = matrix[modelName] || [];
-    let modelVersion = readDefault(['vod-model-version'], ['ModelVersion', 'modelVersion']) || getVodDefaultModelVersionByType(type);
+    if (!modelVersion) modelVersion = getVodDefaultModelVersionByType(type);
     if (!versions.includes(modelVersion)) modelVersion = versions.includes(getVodDefaultModelVersionByType(type)) ? getVodDefaultModelVersionByType(type) : (versions[0] || '');
     if (shouldMigrateVodLegacyDefaultSelection(type, modelName, modelVersion)) {
         modelName = getVodDefaultModelNameByType(type);
@@ -1929,14 +1944,25 @@ const getVodSelectionFromCustomParams = (type, customParams) => {
         modelVersion = defaultVersions.includes(getVodDefaultModelVersionByType(type))
             ? getVodDefaultModelVersionByType(type)
             : (defaultVersions[0] || '');
-        return { modelName, modelVersion, versions: defaultVersions };
+        return { modelName, modelVersion, versions: defaultVersions, isCustom: false };
     }
-    return { modelName, modelVersion, versions };
+    return { modelName, modelVersion, versions, isCustom: false };
 };
 
 const buildVodCustomParamsWithSelection = (type, modelName, modelVersion) => {
     const matrix = getVodMatrixByType(type);
     const modelNames = Object.keys(matrix);
+    // 自定义模型：标记值、空字符串（刚切换）、或不在预设列表中的值
+    const isCustom = modelName === VOD_CUSTOM_MODE_MARKER || (modelName !== undefined && modelName !== null && !modelNames.includes(modelName));
+    if (isCustom) {
+        // 自定义模型：存储标记或用户输入的值
+        const storedName = (!modelName || modelName === VOD_CUSTOM_MODE_MARKER) ? VOD_CUSTOM_MODE_MARKER : modelName;
+        return buildVodCustomParams(type).map((param) => {
+            if (param.id === 'vod-model-name') return { ...param, defaultValue: storedName };
+            if (param.id === 'vod-model-version') return { ...param, defaultValue: modelVersion || '', values: [modelVersion || ''].filter(Boolean) };
+            return param;
+        });
+    }
     const safeModelName = modelNames.includes(modelName) ? modelName : (modelNames[0] || '');
     const versions = matrix[safeModelName] || [];
     const safeModelVersion = versions.includes(modelVersion) ? modelVersion : (versions[0] || '');
@@ -1956,6 +1982,23 @@ const getVodKlingReferenceFeature = (modelName, modelVersion) => {
     if (version === '3.0-omni') return 'multiReference';
     if (version === 'o1') return 'subjectReference';
     return '';
+};
+
+// Kling 3.0 / 3.0-Omni 支持 3~15 秒可选时长
+const VOD_KLING_EXTENDED_DURATIONS = Array.from({ length: 13 }, (_, i) => `${i + 3}s`); // ['3s', '4s', ..., '15s']
+
+// 根据 VOD 视频子模型返回特定的可选时长列表；不适用时返回 null。
+const getVodSubModelDurations = (config, customParams) => {
+    if (getVodConfigType(config) !== 'video') return null;
+    const sel = resolveVodSubModel(
+        'video',
+        customParams,
+        Array.isArray(config?.customParams) ? config.customParams : []
+    );
+    if (String(sel?.modelName || '').trim().toLowerCase() !== 'kling') return null;
+    const version = normalizeVodKlingVersion(sel?.modelVersion);
+    if (version === '3.0' || version === '3.0-omni') return VOD_KLING_EXTENDED_DURATIONS;
+    return null;
 };
 
 const parseVodKlingSubjectInfos = (raw) => {
@@ -1980,26 +2023,7 @@ const DEFAULT_API_CONFIGS = [
     // Image Models
     { id: 'MJ V6', provider: 'midjourney', type: 'Image' },
     { id: 'gpt-4o-image', provider: 'openai', type: 'Image' },
-    { id: 'jimeng-4.5', provider: 'jimeng', type: 'Image' },
-    { id: 'jimeng-4.1', provider: 'jimeng', type: 'Image' },
-    { id: 'jimeng-4.0', provider: 'jimeng', type: 'Image' },
-    { id: 'jimeng-3.1', provider: 'jimeng', type: 'Image' },
-    { id: 'jimeng-3.0', provider: 'jimeng', type: 'Image' },
-    { id: 'jimeng-2.1', provider: 'jimeng', type: 'Image' },
-    { id: 'jimeng-xl-pro', provider: 'jimeng', type: 'Image' },
-    { id: 'nanobananapro', provider: 'jimeng', type: 'Image' },
-    { id: 'nanobanana', provider: 'jimeng', type: 'Image' },
-
     // Video Models
-    { id: 'jimeng-video-3.5-pro', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
-    { id: 'jimeng-video-veo3', provider: 'jimeng', type: 'Video', durations: ['8s'] },
-    { id: 'jimeng-video-veo3.1', provider: 'jimeng', type: 'Video', durations: ['8s'] },
-    { id: 'jimeng-video-sora2', provider: 'jimeng', type: 'Video', durations: ['4s', '8s', '12s'] },
-    { id: 'jimeng-video-3.0-pro', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
-    { id: 'jimeng-video-3.0', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
-    { id: 'jimeng-video-3.0-fast', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
-    { id: 'jimeng-video-2.0-pro', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
-    { id: 'jimeng-video-2.0', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
     { id: 'grok-video-3', provider: 'grok', type: 'Video', durations: ['8s', '5s'] },
 
     // 腾讯云 VOD AIGC（通过 adapter 驱动，ModelName/ModelVersion 通过节点自定义参数选择）
@@ -2103,7 +2127,7 @@ const DELETED_MODEL_IDS = [
     'kling-v1-6',
     'wan-2.5'
 ];
-const REMOVED_PROVIDER_KEYS = ['yunwu'];
+const REMOVED_PROVIDER_KEYS = ['yunwu', 'jimeng'];
 const isRemovedProviderKey = (providerKey) => REMOVED_PROVIDER_KEYS.includes(String(providerKey || '').trim());
 const SETTINGS_PROVIDER_KEYS = [TOKENHUB_PROVIDER_KEY, TENCENT_VOD_PROVIDER_KEY];
 const isSettingsProviderVisible = (providerKey) => SETTINGS_PROVIDER_KEYS.includes(String(providerKey || '').trim());
@@ -4267,8 +4291,6 @@ const buildPythonPreviewSnippet = (endpoint, payload) => {
 // 根据模型返回不同的分辨率选项
 const getDefaultResolutionsForModel = (modelId) => {
     if (!modelId) return RESOLUTIONS;
-    // jimeng-4.5模型只显示2K和4K两个选项
-    if (modelId.includes('jimeng-4.5')) return ['2K', '4K'];
     return RESOLUTIONS;
 };
 // Midjourney版本列表
@@ -5988,7 +6010,6 @@ function VodStudioApp() {
             } else if (
                 next[TOKENHUB_PROVIDER_KEY]?.apiType !== 'openai'
                 || !next[TOKENHUB_PROVIDER_KEY]?.url
-                || next[TOKENHUB_PROVIDER_KEY]?.url === LEGACY_DEFAULT_BASE_URL
             ) {
                 next[TOKENHUB_PROVIDER_KEY] = normalizeProviderConfig(
                     TOKENHUB_PROVIDER_KEY,
@@ -6163,11 +6184,8 @@ function VodStudioApp() {
         error1006WindowRef.current.push(Date.now());
     };
 
-    // 即梦图生图使用本地文件设置（默认true，强制使用本地文件而不是URL）
-    const [jimengUseLocalFile, setJimengUseLocalFile] = useState(() => {
-        const saved = localStorage.getItem('vodstudio_jimeng_use_local_file');
-        return saved !== null ? saved === 'true' : true; // 默认true
-    });
+    // [已移除] 即梦相关设置
+    const jimengUseLocalFile = false;
 
     // V3.4.7: 项目名称状态 - 新项目（无节点）始终显示"未命名项目"
     const [projectName, setProjectName] = useState(() => {
@@ -6232,7 +6250,20 @@ function VodStudioApp() {
     // V2.6.1 Feature: 本地服务器 URL
     const [localServerUrl, setLocalServerUrl] = useState(() => {
         const saved = localStorage.getItem('vodstudio_local_server_url') || '';
-        if (!saved || saved.includes(CLOUD_FUNCTION_PROXY_LEGACY_URL) || saved.includes('app.tcloudbase.com') || saved.includes('tcloudbaseapp.com')) {
+        const isOnCloudBase = typeof window !== 'undefined'
+            && (window.location.hostname.includes('tcloudbaseapp.com')
+                || window.location.hostname.includes('txcloud.vip'));
+
+        // 线上部署环境 → 默认使用云函数代理（安全域名已包含自身，无需额外配置）
+        if (isOnCloudBase) {
+            if (!saved || saved.includes('127.0.0.1') || saved.includes('localhost')) {
+                return CLOUD_FUNCTION_PROXY_URL;
+            }
+            return saved;
+        }
+
+        // 本地开发环境 → 默认使用本地代理
+        if (!saved || saved.includes('app.tcloudbase.com') || saved.includes('tcloudbaseapp.com')) {
             return LOCAL_PROXY_DEFAULT_URL;
         }
         return saved;
@@ -17112,13 +17143,20 @@ function VodStudioApp() {
             const vodUseProxy = true;
             const vodStartTime = Date.now();
 
-            // 统一使用本地/可配置 CORS 转发代理（默认 http://127.0.0.1:9527）
-            const vodProxyBase = (localServerUrl || 'http://127.0.0.1:9527').trim().replace(/\/+$/, '');
+            // 优先使用 Tencent VOD provider 自身配置的代理地址；其次使用全局本地服务地址；最后回退到默认值
+            const vodProxyBase = (
+                (vodProvider?.proxyUrl && String(vodProvider.proxyUrl).trim()) ||
+                localServerUrl ||
+                getDefaultProxyBase()
+            ).trim().replace(/\/+$/, '');
             try {
                 const pingResp = await fetch(`${vodProxyBase}/ping`, { method: 'GET' });
                 if (!pingResp.ok) throw new Error(`HTTP ${pingResp.status}`);
             } catch (err) {
-                alert(`腾讯云 VOD 调用需要启动本地 CORS 转发服务：\n\nnode proxy-server.mjs\n\n当前无法连接 ${vodProxyBase}/ping：${err?.message || err}`);
+                const isOnline = typeof window !== 'undefined' && (window.location.hostname.includes('tcloudbaseapp.com') || window.location.hostname.includes('txcloud.vip'));
+                alert(isOnline
+                    ? `腾讯云 VOD 代理服务连接失败。\n\n当前代理地址：${vodProxyBase}\n错误：${err?.message || err}\n\n请在「设置 → Tencent VOD → 代理地址」中填入可访问的代理地址。\n例如：\n  - 公网部署的 proxy-server.mjs（推荐）\n  - 已配置 HTTP 触发器/CloudRun 的代理服务\n\n或在本地启动：node proxy-server.mjs（默认 http://127.0.0.1:9527）`
+                    : `腾讯云 VOD 调用需要启动本地 CORS 转发服务：\n\nnode proxy-server.mjs\n\n当前无法连接 ${vodProxyBase}/ping：${err?.message || err}`);
                 return;
             }
             let vodCreds;
@@ -21164,7 +21202,7 @@ function VodStudioApp() {
                 }
 
                 let localFiles = [];
-                const baseUrl = (localServerUrl || 'http://127.0.0.1:9527').replace(/\/+$/, '');
+                const baseUrl = (localServerUrl || getDefaultProxyBase()).replace(/\/+$/, '');
                 try {
                     if (baseUrl) {
                         const localFilesRes = await fetch(`${baseUrl}/list-files`);
@@ -21413,7 +21451,7 @@ function VodStudioApp() {
 
             // --- 尝试获取本地库文件列表（用于优先使用本地文件）---
             let localFiles = [];
-            const localBaseUrl = (localServerUrl || 'http://127.0.0.1:9527').replace(/\/+$/, '');
+            const localBaseUrl = (localServerUrl || getDefaultProxyBase()).replace(/\/+$/, '');
             try {
                 if (localBaseUrl) {
                     const localFilesRes = await fetch(`${localBaseUrl}/list-files`);
@@ -22203,9 +22241,11 @@ function VodStudioApp() {
     };
 
     // 获取模型可用的时长选项
-    const getDefaultDurationsForModel = (modelId) => {
+    const getDefaultDurationsForModel = (modelId, customParams = null) => {
         if (!modelId) return ['5s', '10s'];
         const config = getApiConfigByKey(modelId);
+        const vodSubModelDurations = getVodSubModelDurations(config, customParams);
+        if (vodSubModelDurations) return vodSubModelDurations;
         if (Array.isArray(config?.durations) && config.durations.length > 0) {
             return config.durations;
         }
@@ -27162,13 +27202,17 @@ ${inputText.substring(0, 15000)} ... (截断)
             setSettingsOpen(true);
             throw new Error(err.message);
         }
-        // 本地 CORS 转发代理
-        const vodProxyBase = (localServerUrl || 'http://127.0.0.1:9527').trim().replace(/\/+$/, '');
+        // 优先使用 Tencent VOD provider 自身配置的代理地址；其次使用全局本地服务地址；最后回退到默认值
+        const vodProxyBase = (
+            (vodProvider?.proxyUrl && String(vodProvider.proxyUrl).trim()) ||
+            localServerUrl ||
+            getDefaultProxyBase()
+        ).trim().replace(/\/+$/, '');
         try {
             const pingResp = await fetch(`${vodProxyBase}/ping`, { method: 'GET' });
             if (!pingResp.ok) throw new Error(`HTTP ${pingResp.status}`);
         } catch (err) {
-            throw new Error(`腾讯云 VOD 合成需要启动本地 CORS 转发服务（node proxy-server.mjs）。无法连接 ${vodProxyBase}/ping：${err?.message || err}`);
+            throw new Error(`腾讯云 VOD 合成代理无法连接 ${vodProxyBase}/ping：${err?.message || err}\n请在「设置 → Tencent VOD → 代理地址」自定义可用的代理地址，或在本地启动 node proxy-server.mjs。`);
         }
         const result = await runVodComposePipeline(plan, {
             credentials: vodCreds,
@@ -28875,7 +28919,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     || resolveModelKey(apiConfigs.find(c => c.type === 'Video')?.id)
                                     || '';
                                 const modelId = resolveModelKey(node.settings?.model || defaultVideoModel);
-                                const durationOptions = getDefaultDurationsForModel(modelId);
+                                const durationOptions = getDefaultDurationsForModel(modelId, node.settings?.customParams);
                                 const storedDuration = node.settings?.duration;
                                 const currentDuration = durationOptions.includes(storedDuration)
                                     ? storedDuration
@@ -29679,7 +29723,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 type="text"
                                                 value={node.settings?.serverUrl ?? ''}
                                                 onChange={(e) => updateNodeSettings(node.id, { serverUrl: e.target.value })}
-                                                placeholder={localServerUrl || 'http://127.0.0.1:9527'}
+                                                placeholder={localServerUrl || getDefaultProxyBase()}
                                                 className={`flex-1 text-xs border rounded px-2 py-1.5 outline-none focus:border-blue-500 ${theme === 'dark' ? 'bg-zinc-800 border-zinc-700 text-zinc-300 placeholder-zinc-600' : theme === 'solarized' ? 'bg-[#fdf6e3] border-[#eee8d5] text-zinc-800 placeholder-zinc-400' : 'bg-white border-zinc-300 text-zinc-800 placeholder-zinc-400'}`}
                                                 onMouseDown={(e) => e.stopPropagation()}
                                             />
@@ -31074,6 +31118,28 @@ ${inputText.substring(0, 15000)} ... (截断)
                         const storyboardGlobalModelOptions = getStoryboardModelOptionsForMode(storyboardMode);
                         const storyboardGlobalModelSettingKey = storyboardMode === 'video' ? 'storyboardGlobalVideoModel' : 'storyboardGlobalImageModel';
                         const storyboardGlobalRatioSettingKey = storyboardMode === 'video' ? 'storyboardGlobalVideoRatio' : 'storyboardGlobalImageRatio';
+                        const storyboardGlobalStyleSettingKey = storyboardMode === 'video' ? 'storyboardGlobalVideoStyle' : 'storyboardGlobalImageStyle';
+                        const STORYBOARD_STYLE_OPTIONS = [
+                            { value: '', label: t('无') },
+                            { value: 'anime', label: t('动漫') },
+                            { value: 'realistic', label: t('真人') },
+                            { value: '3d-anime', label: t('3D动漫') },
+                            { value: 'cinematic', label: t('电影感') },
+                            { value: 'watercolor', label: t('水彩') },
+                            { value: 'pixel-art', label: t('像素') },
+                        ];
+                        const getStoryboardStylePromptText = (styleValue) => {
+                            switch (styleValue) {
+                                case 'anime': return '动漫风格, anime style';
+                                case 'realistic': return '真人写实风格, realistic style, photorealistic';
+                                case '3d-anime': return '3D动漫风格, 3D anime style, 3D rendering';
+                                case 'cinematic': return '电影感风格, cinematic style, cinematic lighting, film grain';
+                                case 'watercolor': return '水彩风格, watercolor style, soft brushstrokes';
+                                case 'pixel-art': return '像素风格, pixel art style, retro game aesthetic';
+                                default: return '';
+                            }
+                        };
+                        const storyboardGlobalStyle = node.settings?.[storyboardGlobalStyleSettingKey] || '';
                         const storyboardGlobalModel = (() => {
                             const requested = resolveModelKey(node.settings?.[storyboardGlobalModelSettingKey] || getStoryboardDefaultModelKey(storyboardMode));
                             const config = getApiConfigByKey(requested);
@@ -31101,7 +31167,20 @@ ${inputText.substring(0, 15000)} ... (截断)
                             }
                             saveToUndoStack();
                             const customParams = getDefaultCustomParamsForModel(modelKey, null, { preserveByName: false });
+                            // 风格标签处理：生成新的 tags 数组，替换旧的风格标签
+                            const stylePromptText = getStoryboardStylePromptText(storyboardGlobalStyle);
+                            const allStylePromptTexts = STORYBOARD_STYLE_OPTIONS
+                                .map(opt => getStoryboardStylePromptText(opt.value))
+                                .filter(Boolean);
+                            const buildStyleTags = (existingTags) => {
+                                // 移除旧的风格标签（由本功能添加的）
+                                const cleaned = (existingTags || []).filter(tag => !allStylePromptTexts.includes(tag));
+                                // 添加新的风格标签（如果选择了非"无"的风格）
+                                if (stylePromptText) cleaned.push(stylePromptText);
+                                return cleaned;
+                            };
                             const nextShots = currentShots.map((shot) => {
+                                const tags = buildStyleTags(shot.tags);
                                 if (storyboardMode === 'video') {
                                     const resolutionOptions = getVideoResolutionsForModel(modelKey);
                                     const fallbackResolution = getPreferredVideoResolutionForModel(modelKey);
@@ -31113,7 +31192,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         ratio: storyboardGlobalRatio,
                                         resolution,
                                         duration: shot.duration || getDefaultDurationForModel(modelKey),
-                                        customParams: { ...customParams }
+                                        customParams: { ...customParams },
+                                        tags
                                     };
                                 }
                                 const resolutionOptions = getResolutionsForModel(modelKey);
@@ -31126,7 +31206,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     ratio: storyboardGlobalRatio,
                                     resolution,
                                     duration: undefined,
-                                    customParams: { ...customParams }
+                                    customParams: { ...customParams },
+                                    tags
                                 };
                             });
                             try {
@@ -31137,9 +31218,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                             updateNodeSettings(node.id, {
                                 [storyboardGlobalModelSettingKey]: modelKey,
                                 [storyboardGlobalRatioSettingKey]: storyboardGlobalRatio,
+                                [storyboardGlobalStyleSettingKey]: storyboardGlobalStyle,
                                 shots: nextShots
                             });
-                            showToast(`✓ 已应用${storyboardMode === 'video' ? '视频' : '图片'}参数到 ${nextShots.length} 个镜头`, 'success', 2600);
+                            const styleLabel = STORYBOARD_STYLE_OPTIONS.find(o => o.value === storyboardGlobalStyle)?.label || '';
+                            const styleInfo = styleLabel && storyboardGlobalStyle ? ` + 风格「${styleLabel}」` : '';
+                            showToast(`✓ 已应用${storyboardMode === 'video' ? '视频' : '图片'}参数${styleInfo}到 ${nextShots.length} 个镜头`, 'success', 2600);
                         };
 
                         return (
@@ -32828,6 +32912,18 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     <option key={ratio} value={ratio}>{ratio}</option>
                                                                 ))}
                                                             </select>
+                                                            <span className={`text-[10px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'}`}>{t('风格')}</span>
+                                                            <select
+                                                                value={storyboardGlobalStyle}
+                                                                onChange={(e) => updateNodeSettings(node.id, { [storyboardGlobalStyleSettingKey]: e.target.value })}
+                                                                onClick={(e) => e.stopPropagation()}
+                                                                className={storyboardSelectClass}
+                                                                title={t('全局风格（应用后追加到所有镜头提示词）')}
+                                                            >
+                                                                {STORYBOARD_STYLE_OPTIONS.map(({ value, label }) => (
+                                                                    <option key={value} value={value}>{label}</option>
+                                                                ))}
+                                                            </select>
                                                             <button
                                                                 type="button"
                                                                 onClick={(e) => {
@@ -33417,7 +33513,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         {(normalizeStoryboardMode(node.settings?.mode)) === 'video' && (() => {
                                                                             const currentModel = shot.model || (apiConfigs.find(c => c.type === 'Video' && c.id === 'sora-2')?.id || apiConfigs.find(c => c.type === 'Video')?.id || '');
                                                                             const config = getApiConfigByKey(currentModel);
-                                                                            const availableDurations = config?.durations || getDefaultDurationsForModel(currentModel);
+                                                                            const availableDurations = getDefaultDurationsForModel(currentModel, shot.customParams);
                                                                             const defaultDuration = getDefaultDurationForModel(currentModel);
                                                                             return (
                                                                                 <select
@@ -35673,7 +35769,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 (() => {
                                                     const currentModel = getApiConfigByKey(node.settings?.model);
                                                     const isMidjourney = currentModel && (currentModel.id.includes('mj') || currentModel.provider.toLowerCase().includes('midjourney'));
-                                                    const durationOptions = getDefaultDurationsForModel(node.settings?.model);
+                                                    const durationOptions = getDefaultDurationsForModel(node.settings?.model, node.settings?.customParams);
                                                     const storedDuration = node.settings?.duration;
                                                     const currentDuration = durationOptions.includes(storedDuration)
                                                         ? storedDuration
@@ -39126,36 +39222,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     </div>
                                                 </div>
 
-                                                <div className="mb-2">
-                                                    <div className="flex items-center justify-between">
-                                                        <div className="flex-1">
-                                                            <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
-                                                                {t('即梦图生图使用本地文件')}
-                                                            </label>
-                                                            <p className={`text-[10px] mt-0.5 ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>
-                                                                {t('启用后，即梦模型的图生图功能将强制使用本地文件（FormData），URL图片会自动下载转换为本地文件')}
-                                                            </p>
-                                                        </div>
-                                                        <label className="relative inline-flex items-center cursor-pointer ml-3">
-                                                            <input
-                                                                type="checkbox"
-                                                                checked={jimengUseLocalFile}
-                                                                onChange={(e) => {
-                                                                    const newValue = e.target.checked;
-                                                                    setJimengUseLocalFile(newValue);
-                                                                    localStorage.setItem('vodstudio_jimeng_use_local_file', String(newValue));
-                                                                }}
-                                                                className="sr-only peer"
-                                                            />
-                                                            <div className={`w-11 h-6 rounded-full peer peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-500/50 ${jimengUseLocalFile
-                                                                ? 'bg-blue-600'
-                                                                : theme === 'dark'
-                                                                    ? 'bg-zinc-700'
-                                                                    : 'bg-zinc-300'
-                                                                } peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all`}></div>
-                                                        </label>
-                                                    </div>
-                                                </div>
+
                                             </div>
                                         </div>
                                     </details>
@@ -39533,7 +39600,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             : 'bg-zinc-300'
                                                                     } peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all`}></div>
                                                             </label>
-                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? `经 ${localServerUrl || 'http://127.0.0.1:9527'}/proxy 转发到 ${TENCENT_VOD_BASE_URL}` : `使用 ${localServerUrl || 'http://127.0.0.1:9527'}/proxy`}</span>
+                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') ? `经 ${(providers[providerKey]?.proxyUrl || localServerUrl || getDefaultProxyBase())}/proxy 转发到 ${TENCENT_VOD_BASE_URL}` : `使用 ${localServerUrl || getDefaultProxyBase()}/proxy`}</span>
                                                         </div>
                                                     </div>
                                                     <div className="grid grid-cols-4 items-center gap-2">
@@ -39596,12 +39663,30 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             placeholder="https://..."
                                                         />
                                                     </div>
+                                                    {(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') && (
+                                                        <div className="grid grid-cols-4 items-center gap-2">
+                                                            <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`} title={t('用于 VOD 接口的 CORS 转发代理地址；留空则使用全局「本地服务地址」。')}>{t('代理地址')}</label>
+                                                            <div className="col-span-3 flex flex-col gap-1">
+                                                                <input
+                                                                    type="text"
+                                                                    value={providers[providerKey]?.proxyUrl || ''}
+                                                                    onChange={(e) => setProviders(prev => ({ ...prev, [providerKey]: { ...prev[providerKey], proxyUrl: e.target.value } }))}
+                                                                    placeholder={localServerUrl || getDefaultProxyBase() || 'http://127.0.0.1:9527'}
+                                                                    className={`w-full rounded px-2 py-1 text-xs outline-none focus:border-blue-600/50 border ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'}`}
+                                                                />
+                                                                <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                                                                    {t('VOD CORS 转发代理（覆盖全局「本地服务地址」）。本地：node proxy-server.mjs 默认 http://127.0.0.1:9527；线上：填入公网部署的代理地址。')}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    )}
                                                     {(providerKey === TENCENT_VOD_PROVIDER_KEY || providers[providerKey]?.apiType === 'tencent-vod') && (() => {
                                                         const renderVodSelector = (vodType) => {
                                                             const api = group.models.find((item) => getVodConfigType(item) === vodType);
                                                             const selection = getVodSelectionFromCustomParams(vodType, api?.customParams);
                                                             const modelOptions = Object.keys(getVodMatrixByType(vodType));
                                                             const versionOptions = selection.versions || [];
+                                                            const isCustomMode = !!selection.isCustom;
                                                             const title = vodType === 'video' ? '生视频模型' : '生图模型';
                                                             return (
                                                                 <div className={`rounded-lg border p-2 ${theme === 'dark' ? 'bg-cyan-950/20 border-cyan-900/50' : 'bg-cyan-50 border-cyan-200'}`}>
@@ -39610,31 +39695,58 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         <div className="space-y-1">
                                                                             <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>ModelName</label>
                                                                             <select
-                                                                                value={selection.modelName}
+                                                                                value={isCustomMode ? '__custom__' : selection.modelName}
                                                                                 onChange={(e) => {
                                                                                     if (!api) return;
-                                                                                    const nextModelName = e.target.value;
-                                                                                    const nextVersion = getVodMatrixByType(vodType)[nextModelName]?.[0] || '';
-                                                                                    updateVodApiModelSelection(api, vodType, nextModelName, nextVersion);
+                                                                                    const val = e.target.value;
+                                                                                    if (val === '__custom__') {
+                                                                                        updateVodApiModelSelection(api, vodType, VOD_CUSTOM_MODE_MARKER, '');
+                                                                                    } else {
+                                                                                        const nextVersion = getVodMatrixByType(vodType)[val]?.[0] || '';
+                                                                                        updateVodApiModelSelection(api, vodType, val, nextVersion);
+                                                                                    }
                                                                                 }}
                                                                                 disabled={!api}
                                                                                 className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'} ${!api ? 'opacity-60 cursor-not-allowed' : ''}`}
                                                                             >
                                                                                 {modelOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+                                                                                <option value="__custom__">✏️ 自定义</option>
                                                                             </select>
                                                                         </div>
                                                                         <div className="space-y-1">
                                                                             <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>ModelVersion</label>
-                                                                            <select
-                                                                                value={selection.modelVersion}
-                                                                                onChange={(e) => api && updateVodApiModelSelection(api, vodType, selection.modelName, e.target.value)}
-                                                                                disabled={!api}
-                                                                                className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'} ${!api ? 'opacity-60 cursor-not-allowed' : ''}`}
-                                                                            >
-                                                                                {versionOptions.map((version) => <option key={version} value={version}>{version}</option>)}
-                                                                            </select>
+                                                                            {!isCustomMode ? (
+                                                                                <select
+                                                                                    value={selection.modelVersion}
+                                                                                    onChange={(e) => api && updateVodApiModelSelection(api, vodType, selection.modelName, e.target.value)}
+                                                                                    disabled={!api}
+                                                                                    className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'} ${!api ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                                                                >
+                                                                                    {versionOptions.map((version) => <option key={version} value={version}>{version}</option>)}
+                                                                                </select>
+                                                                            ) : (
+                                                                                <input
+                                                                                    type="text"
+                                                                                    value={selection.modelVersion}
+                                                                                    onChange={(e) => api && updateVodApiModelSelection(api, vodType, selection.modelName, e.target.value)}
+                                                                                    placeholder="输入版本号"
+                                                                                    className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'}`}
+                                                                                />
+                                                                            )}
                                                                         </div>
                                                                     </div>
+                                                                    {isCustomMode && (
+                                                                        <div className="mt-2 space-y-1">
+                                                                            <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>自定义 ModelName</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={selection.modelName}
+                                                                                onChange={(e) => api && updateVodApiModelSelection(api, vodType, e.target.value, selection.modelVersion)}
+                                                                                placeholder="输入模型名称"
+                                                                                className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800 text-zinc-300' : 'bg-white border-zinc-300 text-zinc-900'}`}
+                                                                            />
+                                                                        </div>
+                                                                    )}
                                                                 </div>
                                                             );
                                                         };
@@ -39776,7 +39888,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         <span>{t('API模型：')}{api.modelName || api.id}</span>
                                                                         <span>{t('接口：')}{resolvedApiType}</span>
                                                                     </div>
-                                                                    {vodConfigType && vodSelection && (
+                                                                    {vodConfigType && vodSelection && (() => {
+                                                                        const isCardCustomMode = !!vodSelection.isCustom;
+                                                                        return (
                                                                         <div className={`rounded-lg border p-2 ${theme === 'dark'
                                                                             ? 'bg-cyan-950/20 border-cyan-900/50'
                                                                             : 'bg-cyan-50 border-cyan-200'
@@ -39793,11 +39907,15 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 <div className="space-y-1">
                                                                                     <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>ModelName</label>
                                                                                     <select
-                                                                                        value={vodSelection.modelName}
+                                                                                        value={isCardCustomMode ? '__custom__' : vodSelection.modelName}
                                                                                         onChange={(e) => {
-                                                                                            const nextModelName = e.target.value;
-                                                                                            const nextVersion = getVodMatrixByType(vodConfigType)[nextModelName]?.[0] || '';
-                                                                                            updateVodApiModelSelection(api, vodConfigType, nextModelName, nextVersion);
+                                                                                            const val = e.target.value;
+                                                                                            if (val === '__custom__') {
+                                                                                                updateVodApiModelSelection(api, vodConfigType, VOD_CUSTOM_MODE_MARKER, '');
+                                                                                            } else {
+                                                                                                const nextVersion = getVodMatrixByType(vodConfigType)[val]?.[0] || '';
+                                                                                                updateVodApiModelSelection(api, vodConfigType, val, nextVersion);
+                                                                                            }
                                                                                         }}
                                                                                         disabled={!isEditing}
                                                                                         className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
@@ -39808,10 +39926,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                         {vodModelOptions.map((name) => (
                                                                                             <option key={name} value={name}>{name}</option>
                                                                                         ))}
+                                                                                        <option value="__custom__">✏️ 自定义</option>
                                                                                     </select>
                                                                                 </div>
                                                                                 <div className="space-y-1">
                                                                                     <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>ModelVersion</label>
+                                                                                    {!isCardCustomMode ? (
                                                                                     <select
                                                                                         value={vodSelection.modelVersion}
                                                                                         onChange={(e) => updateVodApiModelSelection(api, vodConfigType, vodSelection.modelName, e.target.value)}
@@ -39825,13 +39945,43 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                             <option key={version} value={version}>{version}</option>
                                                                                         ))}
                                                                                     </select>
+                                                                                    ) : (
+                                                                                    <input
+                                                                                        type="text"
+                                                                                        value={vodSelection.modelVersion}
+                                                                                        onChange={(e) => updateVodApiModelSelection(api, vodConfigType, vodSelection.modelName, e.target.value)}
+                                                                                        placeholder="输入版本号"
+                                                                                        disabled={!isEditing}
+                                                                                        className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                            ? 'bg-zinc-900 border-zinc-800 text-zinc-300'
+                                                                                            : 'bg-white border-zinc-300 text-zinc-900'
+                                                                                            } ${!isEditing ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                                                                    />
+                                                                                    )}
                                                                                 </div>
                                                                             </div>
+                                                                            {isCardCustomMode && (
+                                                                                <div className="mt-2 space-y-1">
+                                                                                    <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>自定义 ModelName</label>
+                                                                                    <input
+                                                                                        type="text"
+                                                                                        value={vodSelection.modelName}
+                                                                                        onChange={(e) => updateVodApiModelSelection(api, vodConfigType, e.target.value, vodSelection.modelVersion)}
+                                                                                        placeholder="输入模型名称"
+                                                                                        disabled={!isEditing}
+                                                                                        className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                            ? 'bg-zinc-900 border-zinc-800 text-zinc-300'
+                                                                                            : 'bg-white border-zinc-300 text-zinc-900'
+                                                                                            } ${!isEditing ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                                                                    />
+                                                                                </div>
+                                                                            )}
                                                                             <div className={`mt-2 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'}`}>
                                                                                 选项来自腾讯云 VOD {vodConfigType === 'video' ? 'CreateAigcVideoTask' : 'CreateAigcImageTask'} 文档；修改后会作为该模型的默认调用配置。
                                                                             </div>
                                                                         </div>
-                                                                    )}
+                                                                        );
+                                                                    })()}
                                                                 </div>
                                                             );
                                                         })}
